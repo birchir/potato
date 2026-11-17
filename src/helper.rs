@@ -96,6 +96,8 @@ pub fn run() {
 #[derive(Default)]
 pub struct SessionJobs {
     rejoined: u64,
+    /// Roblox clients in this login with no window yet, and since when (see config::stuck_clients)
+    windowless: HashMap<u32, Instant>,
     muted: HashSet<u32>,
     hung: HashSet<isize>,
     freezes: u32,
@@ -116,6 +118,20 @@ pub fn session_tick(me: &str, jobs: &mut SessionJobs) {
     let mut windows: Vec<isize> = Vec::new();
     unsafe {
         let _ = EnumWindows(Some(collect), LPARAM(&mut windows as *mut _ as isize));
+    }
+    // Roblox that never opened a window (it started without internet) piles up in the tray and makes new
+    // launches quit at once: close it once it's been stuck for a while
+    if a.on {
+        let shown: HashSet<u32> = windows.iter().map(|h| {
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(HWND(*h as *mut _), Some(&mut pid)) };
+            pid
+        }).collect();
+        let session = crate::system::current_session();
+        let hidden: Vec<u32> = crate::system::clients().iter().filter(|c| c.session == session && !shown.contains(&c.pid)).map(|c| c.pid).collect();
+        for pid in crate::config::stuck_clients(&mut jobs.windowless, &hidden, Instant::now()) {
+            crate::system::close(pid);
+        }
     }
     let hung: HashSet<isize> = windows.iter().copied().filter(|h| unsafe { IsHungAppWindow(HWND(*h as *mut _)).as_bool() }).collect();
     let before = jobs.freezes;

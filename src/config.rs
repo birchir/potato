@@ -231,6 +231,17 @@ pub fn extra_clients(config: &Config, clients: &[(&str, u32, u64)]) -> Vec<u32> 
     out
 }
 
+/// How long a Roblox client may run without a window before it counts as stuck.
+pub const STUCK_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Roblox clients that started but never opened a window (a launch without internet sits in the tray like
+/// that, and new launches quit while it runs). `hidden` is every windowless client now; `first_seen` keeps
+/// when each was first seen that way. Returns the ones windowless for `STUCK_AFTER` or longer.
+pub fn stuck_clients(first_seen: &mut std::collections::HashMap<u32, std::time::Instant>, hidden: &[u32], now: std::time::Instant) -> Vec<u32> {
+    first_seen.retain(|pid, _| hidden.contains(pid));
+    hidden.iter().copied().filter(|pid| now.duration_since(*first_seen.entry(*pid).or_insert(now)) >= STUCK_AFTER).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +257,17 @@ mod tests {
         assert_eq!(out, vec![1, 3]);   // A keeps its newest (2); B is within its limit; C has none; unknown accounts are left alone
         c.account_mut("A").on = false;
         assert!(extra_clients(&c, &clients).is_empty());
+    }
+
+    #[test]
+    fn only_clients_windowless_long_enough_are_stuck() {
+        let mut seen = std::collections::HashMap::new();
+        let t0 = std::time::Instant::now();
+        assert!(stuck_clients(&mut seen, &[1, 2], t0).is_empty());   // just seen: give them time to open a window
+        let later = t0 + STUCK_AFTER;
+        assert_eq!(stuck_clients(&mut seen, &[1, 3], later), vec![1]);   // 2 opened a window, 3 is new
+        assert!(!seen.contains_key(&2));
+        assert_eq!(stuck_clients(&mut seen, &[3], later + STUCK_AFTER), vec![3]);
     }
 
     #[test]
