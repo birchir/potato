@@ -55,6 +55,18 @@ pub fn clients() -> Vec<Client> {
     }).collect()
 }
 
+pub fn pids_named(_: &str) -> Vec<u32> {
+    Vec::new()
+}
+
+pub fn console(_: &str) -> bool {
+    true
+}
+
+pub fn launch(_: &str) -> bool {
+    true
+}
+
 pub fn profiles() -> Vec<Profile> {
     ACCOUNTS.iter().enumerate().map(|(i, (name, _, _))| Profile {
         sid: format!("S-1-5-21-{i}"), name: name.to_string(), local: std::env::temp_dir().join("potato-demo-missing"),

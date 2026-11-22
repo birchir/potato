@@ -19,14 +19,7 @@ pub fn basic_settings(local: &Path) -> Option<PathBuf> {
 /// Every Fast Flag file Roblox could read for this user: one per installed Roblox version, plus the ones
 /// Bloxstrap and Fishstrap copy into each launch.
 pub fn flag_files(local: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(versions) = fs::read_dir(local.join("Roblox").join("Versions")) {
-        for v in versions.flatten().map(|e| e.path()) {
-            if v.join("RobloxPlayerBeta.exe").is_file() {
-                out.push(v.join("ClientSettings").join("ClientAppSettings.json"));
-            }
-        }
-    }
+    let mut out = version_flag_files(&local.join("Roblox").join("Versions"));
     for launcher in ["Bloxstrap", "Fishstrap"] {
         let dir = local.join(launcher);
         if dir.is_dir() {
@@ -34,6 +27,40 @@ pub fn flag_files(local: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The Fast Flag file of each player version in a `Roblox\Versions` folder.
+fn version_flag_files(versions: &Path) -> Vec<PathBuf> {
+    let Ok(dirs) = fs::read_dir(versions) else { return Vec::new() };
+    dirs.flatten().map(|e| e.path()).filter(|v| v.join("RobloxPlayerBeta.exe").is_file())
+        .map(|v| v.join("ClientSettings").join("ClientAppSettings.json")).collect()
+}
+
+/// Fast Flag files of a Roblox installed for every user (its installer run as admin puts it in Program Files).
+pub fn shared_flag_files() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)"].iter().filter_map(std::env::var_os)
+        .flat_map(|base| version_flag_files(&PathBuf::from(base).join("Roblox").join("Versions"))).collect();
+    out.dedup();
+    out
+}
+
+/// Apply the plan's flags to these files (see `apply` for when to call it). Returns how many changed.
+pub fn apply_flags(paths: &[PathBuf], plan: &Plan) -> io::Result<usize> {
+    let todo = flag_changes(paths, plan);
+    for (path, text) in &todo {
+        write(path, text)?;
+    }
+    Ok(todo.len())
+}
+
+fn flag_changes(paths: &[PathBuf], plan: &Plan) -> Vec<(PathBuf, String)> {
+    paths.iter().filter_map(|path| {
+        let json = fs::read_to_string(path).unwrap_or_default();
+        if json.is_empty() && !plan.ultra_low {
+            return None;   // nothing to add and nothing to take out
+        }
+        tweaks::apply_flags(&json, plan).filter(|n| *n != json).map(|n| (path.clone(), n))
+    }).collect()
 }
 
 fn backup_of(path: &Path) -> PathBuf {
@@ -92,15 +119,7 @@ fn changes(local: &Path, plan: &Plan) -> io::Result<Vec<(PathBuf, String)>> {
             out.push((xml_path, next));
         }
     }
-    for path in flag_files(local) {
-        let json = fs::read_to_string(&path).unwrap_or_default();
-        if json.is_empty() && !plan.ultra_low {
-            continue;   // nothing to add and nothing to take out
-        }
-        if let Some(next) = tweaks::apply_flags(&json, plan).filter(|n| *n != json) {
-            out.push((path, next));
-        }
-    }
+    out.extend(flag_changes(&flag_files(local), plan));
     Ok(out)
 }
 
@@ -186,6 +205,21 @@ mod tests {
         assert_eq!(restore(&all_files(&local)).unwrap(), 3);
         assert_eq!(fs::read_to_string(&xml).unwrap(), "<int name=\"FramerateCap\">-1</int>");
         assert!(flag_files(&local).iter().all(|p| !p.exists()));   // flag files Potato created are gone again
+    }
+
+    #[test]
+    fn shared_install_flags_go_on_and_off() {
+        let versions = temp("shared").join("Versions");
+        fs::create_dir_all(versions.join("version-x")).unwrap();
+        fs::write(versions.join("version-x/RobloxPlayerBeta.exe"), "").unwrap();
+        let files = version_flag_files(&versions);
+        assert_eq!(files.len(), 1);
+        assert_eq!(apply_flags(&files, &plan(true)).unwrap(), 1);
+        assert!(fs::read_to_string(&files[0]).unwrap().contains(tweaks::ULTRA_LOW_FLAGS[0].0));
+        assert_eq!(apply_flags(&files, &plan(true)).unwrap(), 0);
+        assert_eq!(apply_flags(&files, &plan(false)).unwrap(), 1);   // Potato's flags come back out
+        assert_eq!(restore(&files).unwrap(), 1);
+        assert!(!files[0].exists());
     }
 
     #[test]

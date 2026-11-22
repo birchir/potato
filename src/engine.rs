@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::config::{self, Config, Priority};
+use crate::config::{self, Account, Config, Priority};
 use crate::files;
 use crate::helper::{self, Maximizer};
 use crate::rejoin;
 use crate::system::{self, Client, Cpu, Profile};
-use crate::tweaks::core_masks;
+use crate::tweaks::{core_masks, Plan};
 use crate::version::Release;
 
 const TICK: Duration = Duration::from_secs(2);
@@ -76,6 +76,7 @@ pub struct Engine {
     /// crashed clients waiting a moment in case something else reopens them: (account, server, when)
     crashed: Vec<(String, rejoin::Server, Instant)>,
     upload_applied: Option<u32>,
+    boost_applied: Option<bool>,
     shutdown_done: Option<u32>,
     /// the clock hour (0-23) the last scheduled report went out in, so each hour sends exactly one
     reported_hour: u32,
@@ -123,6 +124,7 @@ impl Engine {
             whereabouts: HashMap::new(),
             crashed: Vec::new(),
             upload_applied: None,
+            boost_applied: None,
             shutdown_done: None,
             reported_hour: system::local_minutes() / 60,   // the first report waits for the next full hour
             history: Vec::new(),
@@ -203,6 +205,15 @@ impl Engine {
             };
             self.states.insert(p.sid.clone(), state);
         }
+        // a Roblox installed for every user has one flag file for all of them: Ultra Low if any account on wants it,
+        // written only while no client runs (one account's setting can't flip-flop with another's)
+        let on: Vec<Account> = self.profiles.iter().map(|p| self.config.account(&p.sid)).filter(|a| a.on).collect();
+        if running.is_empty() && !on.is_empty() {
+            let plan = Plan { ultra_low: on.iter().any(|a| a.plan.ultra_low), ..on[0].plan.clone() };
+            if files::apply_flags(&files::shared_flag_files(), &plan).is_err() {
+                self.note = "Couldn't Change Roblox's Shared Settings".into();
+            }
+        }
         self.measure_cpu();
         let at = self.history_start.elapsed().as_secs();
         if self.history.last().is_none_or(|s| at >= s.at + 30) && self.history.len() < 2880 {
@@ -218,6 +229,7 @@ impl Engine {
         self.apply_cpu();
         self.keep_maximized();
         self.apply_upload_cap();
+        self.apply_cpu_boost();
         self.shutdown_on_time();
         self.report();
         let hours = self.config.restart_hours;
@@ -264,18 +276,22 @@ impl Engine {
         }
         let pids: HashSet<u32> = self.clients.iter().map(|c| c.pid).collect();
         self.cpu_set.retain(|pid, _| pids.contains(pid));
-        // hard CPU caps: a job per capped client; a lifted cap goes back to 100%
-        for c in &self.clients {
+        // hard CPU caps: a job per capped client or Remote Desktop window; a lifted cap goes back to 100%
+        let mut caps: Vec<(u32, u32)> = self.clients.iter().map(|c| {
             let a = self.config.account(&c.sid);
-            let want = if a.on { a.cpu_limit } else { 0 };
-            let had = self.jobs.get(&c.pid).map_or(0, |j| j.0);
+            (c.pid, if a.on { a.cpu_limit } else { 0 })
+        }).collect();
+        caps.extend(system::pids_named("mstsc.exe").into_iter().map(|pid| (pid, self.config.rdp_cpu_limit)));
+        let pids: HashSet<u32> = caps.iter().map(|c| c.0).collect();
+        for &(pid, want) in &caps {
+            let had = self.jobs.get(&pid).map_or(0, |j| j.0);
             if want == had || (want == 0 && had == 100) {
                 continue;
             }
-            let mut job = self.jobs.get(&c.pid).map(|j| j.1);
-            if system::cpu_cap(c.pid, if want == 0 { 100 } else { want }, &mut job)
+            let mut job = self.jobs.get(&pid).map(|j| j.1);
+            if system::cpu_cap(pid, if want == 0 { 100 } else { want }, &mut job)
                 && let Some(j) = job {
-                self.jobs.insert(c.pid, (if want == 0 { 100 } else { want }, j));
+                self.jobs.insert(pid, (if want == 0 { 100 } else { want }, j));
             }
         }
         for (_, j) in self.jobs.extract_if(|pid, _| !pids.contains(pid)) {
@@ -368,6 +384,27 @@ impl Engine {
         }
         if !system::run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]) && want > 0 {
             self.note = "Couldn't Set The Upload Cap".into();
+        }
+    }
+
+    /// Processor boost mode on the active power plan (plugged in and on battery), set only when the switch changes.
+    fn apply_cpu_boost(&mut self) {
+        let want = self.config.cpu_boost_off;
+        let first = self.boost_applied.is_none();
+        if self.boost_applied == Some(want) {
+            return;
+        }
+        self.boost_applied = Some(want);
+        if first && !want {
+            return;   // never touch a PC whose owner didn't ask
+        }
+        // shortcut: "on" writes 2 (Aggressive, Windows' default) instead of the plan's old value; read it first if anyone had a custom one
+        let mode = if want { "0" } else { "2" };
+        let ok = ["/setacvalueindex", "/setdcvalueindex"].iter()
+            .all(|set| system::run("powercfg", &[set, "SCHEME_CURRENT", "SUB_PROCESSOR", "PERFBOOSTMODE", mode]))
+            && system::run("powercfg", &["/setactive", "SCHEME_CURRENT"]);
+        if !ok {
+            self.note = "Couldn't Change CPU Boost".into();
         }
     }
 
@@ -569,6 +606,13 @@ impl Engine {
         self.last_tick = None;
     }
 
+    /// A System Restore point, so the advanced tools can be undone. Windows makes at most one a day.
+    pub fn restore_point(&mut self) {
+        let ok = system::run("powershell", &["-NoProfile", "-NonInteractive", "-Command",
+            "Enable-ComputerRestore -Drive \"$env:SystemDrive\\\"; Checkpoint-Computer -Description 'Before Potato Tweaks' -RestorePointType MODIFY_SETTINGS -ErrorAction Stop"]);
+        self.note = if ok { "Made A Restore Point" } else { "Couldn't Make A Restore Point" }.into();
+    }
+
     pub fn restore(&mut self) {
         let mut n = 0;
         for p in &self.profiles {
@@ -577,6 +621,7 @@ impl Engine {
                 self.config.account_mut(&p.sid).on = false;   // otherwise the next tick would apply everything again
             }
         }
+        n += files::restore(&files::shared_flag_files()).unwrap_or(0);
         self.changed();
         self.note = format!("Restored {n} Files. Switch an account back on to use Potato again.");
     }

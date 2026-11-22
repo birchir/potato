@@ -29,6 +29,7 @@ pub fn run() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_title("Potato")
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).unwrap_or_default())
             .with_inner_size([1000.0, 760.0]).with_min_inner_size([820.0, 560.0]),
+        centered: true,   // Windows otherwise opens it wherever it last cascaded windows, often off to the side
         ..Default::default()
     };
     eframe::run_native("Potato", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
@@ -54,6 +55,7 @@ pub struct App {
     page: Page,
     /// Restart All was clicked once and asks for a second click until then
     confirm_restart: Option<Instant>,
+    confirm_debloat: Option<Instant>,
     update_dismissed: bool,
     /// what's typed in each account's FPS box
     fps_text: HashMap<String, String>,
@@ -79,12 +81,17 @@ impl App {
         let engine = Engine::start(move || ctx.request_repaint());
         let first = engine.lock().unwrap().profiles.first().map(|p| p.sid.clone());
         let hwnd = window_handle(cc);
+        #[cfg(windows)]
+        if let Some(h) = hwnd {
+            crate::tray::name_taskbar(h);
+        }
         App {
             #[cfg(windows)]
             _tray: hwnd.and_then(|h| crate::tray::create(h, cc.egui_ctx.clone(), engine.clone())),
             engine,
             page: first.map_or(Page::WholePc, Page::Account),
             confirm_restart: None,
+            confirm_debloat: None,
             update_dismissed: false,
             fps_text: HashMap::new(),
             shutdown_text: None,
@@ -406,6 +413,7 @@ impl App {
             row(ui, "Upload Cap", "Limits how fast all of Roblox can upload, for slow internet. Empty for no cap", false, |ui, id| {
                 number_box(ui, id, &mut c.upload_kbps, 1_000_000, "kbit/s", "None");
             });
+            switch_row(ui, "Turn Off CPU Boost", "Keeps the CPU at its base speed: less heat and fewer CPU spikes with many clients", false, &mut c.cpu_boost_off);
             row(ui, "Turn PC Off At", "Every day at this time, like 6:30, 0630 or 6pm. Empty for never", true, |ui, id| {
                 let text = self.shutdown_text.get_or_insert_with(|| c.shutdown_at.clone());
                 let r = ui.add(egui::TextEdit::singleline(text).desired_width(84.0).hint_text("Never").align(egui::Align2::CENTER_CENTER)).labelled_by(id);
@@ -450,6 +458,42 @@ impl App {
         if test {
             e.send_report_now();
             e.note = "Sending A Report To Discord".into();
+        }
+        let busy = *self.busy.lock().unwrap();
+        let (mut point, mut debloat, mut shutup) = (false, false, false);
+        let armed = self.confirm_debloat.is_some_and(|t| t.elapsed() < Duration::from_secs(4));
+        group(ui, "Advanced (Risky)", |ui| {
+            row(ui, "Make A Restore Point", "Lets System Restore undo the tools below. Windows makes one a day at most", false, |ui, id| {
+                point = ui.add_enabled(busy.is_none(), egui::Button::new(if busy == Some("point") { "Making..." } else { "Make" })).labelled_by(id).clicked();
+            });
+            row(ui, "Remote Desktop CPU Limit", "Caps each Remote Desktop window. Too low and sessions freeze or disconnect", false, |ui, id| {
+                number_box(ui, id, &mut e.config.rdp_cpu_limit, 100, "%", "None");
+            });
+            row(ui, "Remove Windows Bloat", "Chris Titus Tech's utility. Wrong picks can break Windows Update or the Store", false, |ui, id| {
+                debloat = ui.button(if armed { "Click Again To Open" } else { "Open" }).labelled_by(id).clicked();
+            });
+            row(ui, "Turn Off Windows Tracking", "O&O ShutUp10++ download. Some switches turn off Windows Update or Defender", true, |ui, id| {
+                shutup = ui.button("Open").labelled_by(id).clicked();
+            });
+        });
+        if armed {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+        if point {
+            self.run_action("point", ui.ctx(), |e| e.restore_point());
+        }
+        if debloat {
+            self.confirm_debloat = if armed {
+                if !crate::system::console("irm https://christitus.com/win | iex") {
+                    e.note = "Couldn't Open The Windows Utility".into();
+                }
+                None
+            } else {
+                Some(Instant::now())
+            };
+        }
+        if shutup {
+            crate::system::launch("https://www.oo-software.com/en/shutup10");
         }
         let mut restore = false;
         group(ui, "Potato", |ui| {

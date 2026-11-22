@@ -55,3 +55,30 @@ pub fn hide(hwnd: isize) {
         let _ = ShowWindow(HWND(hwnd as *mut _), SW_HIDE);
     }
 }
+
+/// The name on the taskbar's right-click menu. Windows otherwise takes it from a cache of the exe's name made on first
+/// run, so anyone who ran 0.1.0 (named "potato") kept seeing lowercase. Setting it on the window skips that cache.
+pub fn name_taskbar(hwnd: isize) {
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+    use windows::Win32::UI::Shell::SHStrDupW;
+    use windows::core::{GUID, HSTRING};
+
+    let Ok(exe) = std::env::current_exe() else { return };
+    // System.AppUserModel.RelaunchCommand (2), .RelaunchDisplayNameResource (4), .ID (5); Windows wants the ID last
+    let props = [(2, format!("\"{}\"", exe.display())), (4, "Potato".to_string()), (5, "birchir.Potato".to_string())];
+    unsafe {
+        let Ok(store) = SHGetPropertyStoreForWindow::<IPropertyStore>(HWND(hwnd as *mut _)) else { return };
+        for (pid, val) in props {
+            let Ok(text) = SHStrDupW(&HSTRING::from(val)) else { return };
+            let mut pv = PROPVARIANT::default();   // dropping it frees the string (PropVariantClear)
+            let inner = &mut *pv.Anonymous.Anonymous;
+            inner.vt = VT_LPWSTR;
+            inner.Anonymous.pwszVal = text;
+            let _ = store.SetValue(&PROPERTYKEY { fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3), pid }, &pv);
+        }
+        let _ = store.Commit();
+    }
+}

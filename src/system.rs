@@ -90,6 +90,11 @@ pub fn enable_privileges() {
 }
 
 pub fn clients() -> Vec<Client> {
+    pids_named(ROBLOX_EXE).into_iter().map(client).collect()
+}
+
+/// Every running process with this exe name, in any session.
+pub fn pids_named(exe: &str) -> Vec<u32> {
     let mut out = Vec::new();
     unsafe {
         let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
@@ -97,8 +102,8 @@ pub fn clients() -> Vec<Client> {
         let mut ok = Process32FirstW(snap, &mut e).is_ok();
         while ok {
             let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
-            if String::from_utf16_lossy(&e.szExeFile[..len]).eq_ignore_ascii_case(ROBLOX_EXE) {
-                out.push(client(e.th32ProcessID));
+            if String::from_utf16_lossy(&e.szExeFile[..len]).eq_ignore_ascii_case(exe) {
+                out.push(e.th32ProcessID);
             }
             ok = Process32NextW(snap, &mut e).is_ok();
         }
@@ -316,6 +321,11 @@ pub fn command_line(pid: u32) -> Option<String> {
         let s = &*(buf.as_ptr() as *const UnicodeString);
         Some(String::from_utf16_lossy(std::slice::from_raw_parts(s.buffer, s.length as usize / 2)))
     }
+}
+
+/// Run a PowerShell command in its own visible window, for tools the user drives themselves.
+pub fn console(command: &str) -> bool {
+    std::process::Command::new("powershell").args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]).spawn().is_ok()
 }
 
 /// Open a Roblox join link in this session, as this user.
