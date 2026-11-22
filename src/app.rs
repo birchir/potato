@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, Frame, Margin, RichText, Sense, Stroke, Ui};
 
 use crate::config::Priority;
+use crate::rdp::Patch;
 use crate::engine::{self, Engine, State, UpdateState, gb};
 
 const BG: Color32 = Color32::from_rgb(10, 10, 10);
@@ -48,6 +49,7 @@ fn dur(seconds: f32) -> f32 {
 enum Page {
     Account(String),
     WholePc,
+    RemoteDesktop,
 }
 
 pub struct App {
@@ -62,6 +64,9 @@ pub struct App {
     /// what's typed in the boxes whose value only counts once it's complete (a time, a link)
     shutdown_text: Option<String>,
     webhook_text: Option<String>,
+    /// the Remote Desktop page's new account boxes
+    new_name: String,
+    new_pass: String,
     /// the header action running in the background, if any (so the window never waits on it)
     busy: Arc<Mutex<Option<&'static str>>>,
     /// the last result shown as a toast, and when it appeared (the window's own clock, so animation stays in step)
@@ -96,6 +101,8 @@ impl App {
             fps_text: HashMap::new(),
             shutdown_text: None,
             webhook_text: None,
+            new_name: String::new(),
+            new_pass: String::new(),
             busy: Arc::default(),
             toast: None,
             hwnd,
@@ -137,9 +144,14 @@ impl eframe::App for App {
                 match self.page.clone() {
                     Page::Account(sid) => self.account_page(ui, &mut e, &sid),
                     Page::WholePc => self.pc_page(ui, &mut e),
+                    Page::RemoteDesktop => self.rdp_page(ui, &mut e),
                 }
             });
         });
+        let rdp_msg = e.rdp.lock().unwrap().msg.take();
+        if let Some(msg) = rdp_msg {
+            e.note = msg;
+        }
         if !e.note.is_empty() {
             self.toast = Some((std::mem::take(&mut e.note), ui.ctx().input(|i| i.time)));
         }
@@ -197,6 +209,16 @@ impl App {
         if r.clicked() {
             self.page = Page::WholePc;
         }
+        let rdp = e.rdp.lock().unwrap().clone();
+        let warn = rdp.reverted(e.config.rdp_patched);
+        let right = match rdp.accounts.len() { 0 => String::new(), 1 => "1 Account".into(), n => format!("{n} Accounts") };
+        let r = nav_item(ui, "Remote Desktop", &right, warn.then_some(BAD), self.page == Page::RemoteDesktop);
+        if self.page == Page::RemoteDesktop {
+            marker = Some(r.rect);
+        }
+        if r.clicked() {
+            self.page = Page::RemoteDesktop;
+        }
         // the marker slides from the old choice to the new one (post to post, slow in and out)
         if let Some(rect) = marker {
             let y = ui.ctx().animate_value_with_time(egui::Id::unique("nav-marker"), rect.top(), dur(0.2));
@@ -241,6 +263,7 @@ impl App {
     }
 
     fn banner(&mut self, ui: &mut Ui, e: &Engine) {
+        self.rdp_banner(ui, e);
         let state = e.update.lock().unwrap().clone();
         let (title, note) = match &state {
             UpdateState::None => return,
@@ -278,6 +301,35 @@ impl App {
         ui.add_space(18.0);
     }
 
+    /// Windows undid the Remote Desktop patch (an update put its own file back): say so on every page, with the fix.
+    fn rdp_banner(&mut self, ui: &mut Ui, e: &Engine) {
+        let r = e.rdp.lock().unwrap().clone();
+        if !r.reverted(e.config.rdp_patched) {
+            return;
+        }
+        let fits = r.patch == Patch::Unpatched;
+        let note = if fits { "Only one Remote Desktop can be on until it's patched again." } else { "Windows updated its Remote Desktop file and Potato's patch doesn't fit it yet. Only one Remote Desktop can be on." };
+        Frame::new().fill(Color32::from_rgb(48, 20, 20)).stroke(Stroke::new(1.0, BAD)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(16, 12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(semi("Windows Undid The Remote Desktop Patch", 14.0).color(TEXT));
+                    ui.label(RichText::new(note).size(12.5).color(DIM));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if fits {
+                        if button(ui, if r.busy == Some("patch") { "Patching" } else { "Patch Again" }, r.busy == Some("patch"), true).clicked() {
+                            engine::refresh_rdp(e.rdp.clone(), Some("patch"), crate::rdp::patch);
+                        }
+                    } else if self.page != Page::RemoteDesktop && ui.button("Open Remote Desktop").clicked() {
+                        self.page = Page::RemoteDesktop;
+                    }
+                });
+            });
+        });
+        ui.add_space(18.0);
+    }
+
     fn header(&mut self, ui: &mut Ui, e: &mut Engine) {
         let (title, crumb) = match &self.page {
             Page::Account(sid) => {
@@ -296,6 +348,16 @@ impl App {
                 (name, format!("{running} · {state}"))
             }
             Page::WholePc => ("Whole PC".to_string(), "Settings for every account".to_string()),
+            Page::RemoteDesktop => {
+                let r = e.rdp.lock().unwrap();
+                let n = r.accounts.len();
+                let at_once = match r.patch {
+                    Patch::Patched => "All On At Once",
+                    Patch::Unpatched | Patch::Unsupported => "One At A Time",
+                    Patch::Unknown => "Checking",
+                };
+                ("Remote Desktop".to_string(), format!("{n} {} · {at_once}", if n == 1 { "Account" } else { "Accounts" }))
+            }
         };
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -466,9 +528,6 @@ impl App {
             row(ui, "Make A Restore Point", "Lets System Restore undo the tools below. Windows makes one a day at most", false, |ui, id| {
                 point = ui.add_enabled(busy.is_none(), egui::Button::new(if busy == Some("point") { "Making..." } else { "Make" })).labelled_by(id).clicked();
             });
-            row(ui, "Remote Desktop CPU Limit", "Caps each Remote Desktop window. Too low and sessions freeze or disconnect", false, |ui, id| {
-                number_box(ui, id, &mut e.config.rdp_cpu_limit, 100, "%", "None");
-            });
             row(ui, "Remove Windows Bloat", "Chris Titus Tech's utility. Wrong picks can break Windows Update or the Store", false, |ui, id| {
                 debloat = ui.button(if armed { "Click Again To Open" } else { "Open" }).labelled_by(id).clicked();
             });
@@ -554,6 +613,78 @@ fn nav_item(ui: &mut Ui, name: &str, right: &str, dot: Option<Color32>, picked: 
 }
 
 /// A titled block of setting rows, like a group in Windows Settings.
+impl App {
+    /// Remote Desktop alts: let them all on at once, make accounts the way Computer Management does, open them.
+    fn rdp_page(&mut self, ui: &mut Ui, e: &mut Engine) {
+        let r = e.rdp.lock().unwrap().clone();
+        let busy = r.busy;
+        let (mut patch, mut undo, mut add, mut open) = (false, false, false, None);
+        group(ui, "All On At Once", |ui| {
+            let (note, can) = match r.patch {
+                Patch::Patched => ("On. Potato warns you if a Windows update undoes it", false),
+                Patch::Unpatched => ("Windows Pro allows one at a time. Open windows disconnect for a moment; Roblox keeps running", true),
+                Patch::Unsupported => ("This Windows version's file doesn't match the patch yet. Only one can be on", false),
+                Patch::Unknown => ("Checking Windows' Remote Desktop file", false),
+            };
+            row(ui, "Let Every Account On", note, !r.can_undo, |ui, id| {
+                if can {
+                    patch = ui.add_enabled(busy.is_none(), egui::Button::new(if busy == Some("patch") { "Patching..." } else { "Patch" })).labelled_by(id).clicked();
+                } else if r.patch == Patch::Patched {
+                    ui.label(semi("On", 13.5).color(GOOD));
+                }
+            });
+            if r.can_undo {
+                row(ui, "Undo The Patch", "Puts Windows' own file back. Only one Remote Desktop can be on after", true, |ui, id| {
+                    undo = ui.add_enabled(busy.is_none(), egui::Button::new(if busy == Some("undo") { "Undoing..." } else { "Undo" })).labelled_by(id).clicked();
+                });
+            }
+        });
+        group(ui, "Accounts", |ui| {
+            for name in &r.accounts {
+                row(ui, name, &format!("Opens on {}", crate::rdp::address(name)), false, |ui, id| {
+                    if ui.button("Open").labelled_by(id).clicked() {
+                        open = Some(name.clone());
+                    }
+                });
+            }
+            let ok_name = crate::rdp::valid_name(&self.new_name);
+            row(ui, "New Account", "A Windows user in Remote Desktop Users", false, |ui, id| {
+                let r = ui.add(egui::TextEdit::singleline(&mut self.new_name).desired_width(180.0).hint_text("Name").char_limit(20)).labelled_by(id);
+                if !self.new_name.is_empty() && !ok_name && !r.has_focus() {
+                    ui.label(RichText::new("Can't Use / \\ [ ] : ; | = , + * ? < > @").size(12.5).color(BAD));
+                }
+            });
+            row(ui, "Its Password", "For an account you already have, type its password", false, |ui, id| {
+                ui.add(egui::TextEdit::singleline(&mut self.new_pass).desired_width(180.0).hint_text("Password").password(true)).labelled_by(id);
+            });
+            row(ui, "Make It", "Saves the login, so Open signs straight in", true, |ui, id| {
+                let ready = ok_name && !self.new_pass.is_empty() && busy.is_none();
+                add = ui.add_enabled(ready, egui::Button::new(if busy == Some("add") { "Making..." } else { "Make Account" })).labelled_by(id).clicked();
+            });
+        });
+        group(ui, "CPU", |ui| {
+            row(ui, "Remote Desktop CPU Limit", "Caps each Remote Desktop window. Too low and sessions freeze or disconnect", true, |ui, id| {
+                number_box(ui, id, &mut e.config.rdp_cpu_limit, 100, "%", "None");
+            });
+        });
+        if patch {
+            engine::refresh_rdp(e.rdp.clone(), Some("patch"), crate::rdp::patch);
+        }
+        if undo {
+            e.config.rdp_patched = false;   // you undid it, not Windows: no warning
+            engine::refresh_rdp(e.rdp.clone(), Some("undo"), crate::rdp::undo);
+        }
+        if add {
+            let (name, pass) = (self.new_name.trim().to_string(), std::mem::take(&mut self.new_pass));
+            self.new_name.clear();
+            engine::refresh_rdp(e.rdp.clone(), Some("add"), move || crate::rdp::add_account(&name, &pass));
+        }
+        if let Some(name) = open && let Err(m) = crate::rdp::open(&name) {
+            e.note = m;
+        }
+    }
+}
+
 fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
     ui.add_space(16.0);
     ui.label(semi(title, 14.0).color(TEXT));

@@ -52,6 +52,7 @@ Closing the window keeps Potato running in the tray. New versions install themse
 | **Clean up after outages** | One Client Only closes the older copy when a second Roblox opens on the same account. Rejoin After A Crash reopens a client that closed by itself. |
 | **Open maximized** | Every Roblox window fills the screen with its title bar kept, in every RDP login. |
 | **Discord reports** | Posts each account's RAM, CPU, uptime, freezes and restarts to a Discord webhook, with a screenshot of each RDP's Roblox. |
+| **Remote Desktop alts** | Patches Windows so every account can be on at once, warns you when an update undoes it, makes new alt accounts and opens each one with no password box. |
 | **Upload cap and timer** | Limits how fast Roblox uploads on a slow connection, and turns the PC off at a time you pick. |
 
 ## Is it safe?

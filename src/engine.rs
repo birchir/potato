@@ -15,6 +15,8 @@ use crate::tweaks::{core_masks, Plan};
 use crate::version::Release;
 
 const TICK: Duration = Duration::from_secs(2);
+/// how often Windows' Remote Desktop file is checked for an update that undid the patch
+const RDP_EVERY: Duration = Duration::from_secs(10 * 60);
 const UPDATE_EVERY: Duration = Duration::from_secs(10 * 60);   // GitHub allows 60 signed-out checks an hour per PC
 #[cfg(windows)]
 const RELEASES: &str = "https://api.github.com/repos/birchir/potato/releases/latest";
@@ -57,6 +59,8 @@ pub struct Engine {
     pub freed: u64,
     pub cores: usize,
     pub update: Update,
+    /// the Remote Desktop page's state, looked up on its own thread
+    pub rdp: Arc<Mutex<crate::rdp::Rdp>>,
     pub note: String,
     /// each client's CPU use since the last look, in percent of the whole PC
     pub cpu_pct: HashMap<u32, f32>,
@@ -89,6 +93,9 @@ pub struct Engine {
     maximizer: Maximizer,
     helper_installed: Option<bool>,
     last_update_check: Option<Instant>,
+    last_rdp_check: Option<Instant>,
+    /// the Windows notification about an undone Remote Desktop patch went out (once per undo)
+    rdp_warned: bool,
     last_tick: Option<Instant>,
     last_trim: Instant,
     last_clean: Instant,
@@ -113,6 +120,7 @@ impl Engine {
             freed: 0,
             cores: system::logical_cores(),
             update: Update::default(),
+            rdp: Default::default(),
             note: String::new(),
             cpu_pct: HashMap::new(),
             restarts: HashMap::new(),
@@ -134,6 +142,8 @@ impl Engine {
             maximizer: Maximizer::default(),
             helper_installed: None,
             last_update_check: None,
+            last_rdp_check: None,
+            rdp_warned: false,
             last_tick: None,
             last_trim: Instant::now(),
             last_clean: Instant::now(),
@@ -177,6 +187,11 @@ impl Engine {
             self.last_update_check = Some(Instant::now());
             check_for_update(self.update.clone());
         }
+        if self.last_rdp_check.is_none_or(|t| t.elapsed() >= RDP_EVERY) {
+            self.last_rdp_check = Some(Instant::now());
+            refresh_rdp(self.rdp.clone(), None, || Ok(()));
+        }
+        self.watch_rdp();
         if self.last_tick.is_some_and(|t| t.elapsed() < TICK) {
             return;
         }
@@ -607,6 +622,24 @@ impl Engine {
     }
 
     /// A System Restore point, so the advanced tools can be undone. Windows makes at most one a day.
+    /// Remember a patched Remote Desktop, and warn once each time Windows undoes it.
+    fn watch_rdp(&mut self) {
+        let r = self.rdp.lock().unwrap().clone();
+        if r.busy.is_some() {
+            return;   // mid patch or undo: the file is changing
+        }
+        if r.patch == crate::rdp::Patch::Patched {
+            self.rdp_warned = false;
+            if !self.config.rdp_patched {
+                self.config.rdp_patched = true;
+                self.changed();
+            }
+        } else if r.reverted(self.config.rdp_patched) && !self.rdp_warned {
+            self.rdp_warned = true;
+            system::notify("Windows undid the Remote Desktop patch, so only one Remote Desktop can be on. Patch it again on Potato's Remote Desktop page.");
+        }
+    }
+
     pub fn restore_point(&mut self) {
         let ok = system::run("powershell", &["-NoProfile", "-NonInteractive", "-Command",
             "Enable-ComputerRestore -Drive \"$env:SystemDrive\\\"; Checkpoint-Computer -Description 'Before Potato Tweaks' -RestorePointType MODIFY_SETTINGS -ErrorAction Stop"]);
@@ -698,5 +731,33 @@ pub fn install_update(r: Release, update: Update) {
             std::process::exit(0);
         }
         fail("Updated. Close Potato and open it again.");
+    });
+}
+
+/// Run a Remote Desktop action (`busy` names it for the page) on its own thread, then look everything up again.
+/// The engine isn't locked meanwhile, so the window keeps answering while Remote Desktop restarts.
+pub fn refresh_rdp(rdp: Arc<Mutex<crate::rdp::Rdp>>, busy: Option<&'static str>, work: impl FnOnce() -> Result<(), String> + Send + 'static) {
+    {
+        let mut r = rdp.lock().unwrap();
+        if busy.is_some() && r.busy.is_some() {
+            return;
+        }
+        r.busy = busy.or(r.busy);
+    }
+    std::thread::spawn(move || {
+        let done = work();
+        let mut fresh = crate::rdp::look();
+        let mut r = rdp.lock().unwrap();
+        fresh.busy = if busy.is_some() { None } else { r.busy };
+        fresh.msg = match done {
+            Err(e) => Some(e),
+            Ok(()) => busy.map(|b| match b {
+                "patch" => "Every Account Can Be On At Once Now",
+                "undo" => "Put Windows' Own File Back",
+                "add" => "Account Ready: Click Open",
+                _ => "Done",
+            }.to_string()).or(r.msg.take()),
+        };
+        *r = fresh;
     });
 }

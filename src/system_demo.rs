@@ -135,3 +135,13 @@ pub fn memory() -> (u64, u64) {
     let roblox: u64 = ACCOUNTS.iter().map(|a| ram(a.2)).sum();
     (19_560 * MB - ACCOUNTS.iter().map(|a| a.2 * MB).sum::<u64>() + roblox, 31_850 * MB)
 }
+
+pub fn powershell(_: &str, _: &[(&str, &str)]) -> Result<String, String> {
+    Ok("Alt1\nAlt2".into())
+}
+
+pub fn save_rdp_login(_: &str, _: &str, _: &str) -> bool {
+    true
+}
+
+pub fn trust_rdp_file(_: &str) {}

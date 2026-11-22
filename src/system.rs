@@ -437,3 +437,54 @@ impl WideZ for std::ffi::OsStr {
         self.encode_wide().chain([0]).collect()
     }
 }
+
+/// Run a PowerShell script with no window. `env` carries values (like passwords) that mustn't show in the command
+/// line. The script goes in base64 so its quotes reach PowerShell as written. Ok(output), or Err(its first error).
+pub fn powershell(script: &str, env: &[(&str, &str)]) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &crate::rdp::base64(&utf16)])
+        .envs(env.iter().copied()).creation_flags(0x0800_0000).output().map_err(|e| e.to_string())?;
+    let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
+    if out.status.success() {
+        Ok(text(&out.stdout))
+    } else {
+        let err = text(&out.stderr);
+        Err(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("PowerShell Failed").to_string())
+    }
+}
+
+/// Save a Remote Desktop login in Credential Manager (what `cmdkey /generic:TERMSRV/<host>` does), so mstsc
+/// signs in without asking and the password never sits in a file or a command line.
+pub fn save_rdp_login(host: &str, user: &str, password: &str) -> bool {
+    use windows::Win32::Security::Credentials::{CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredWriteW};
+    let mut target = std::ffi::OsStr::new(&format!("TERMSRV/{host}")).encode_wide_z();
+    let mut name = std::ffi::OsStr::new(user).encode_wide_z();
+    let blob: Vec<u8> = password.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let cred = CREDENTIALW {
+        Type: CRED_TYPE_GENERIC,
+        TargetName: PWSTR(target.as_mut_ptr()),
+        CredentialBlobSize: blob.len() as u32,
+        CredentialBlob: blob.as_ptr() as *mut u8,
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        UserName: PWSTR(name.as_mut_ptr()),
+        ..Default::default()
+    };
+    unsafe { CredWriteW(&cred, 0) }.is_ok()
+}
+
+/// Tick "Don't ask me again for connections to this computer" for a loopback address, so opening Potato's
+/// unsigned .rdp files skips the unknown publisher prompt. 0x4c covers the clipboard and printers those files allow.
+pub fn trust_rdp_file(host: &str) {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, RegCreateKeyExW, RegSetValueExW};
+    let mut key = HKEY::default();
+    let name = std::ffi::OsStr::new(host).encode_wide_z();
+    unsafe {
+        if RegCreateKeyExW(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Terminal Server Client\\LocalDevices"), None, None,
+            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None).is_ok() {
+            let _ = RegSetValueExW(key, PCWSTR(name.as_ptr()), None, REG_DWORD, Some(&0x4c_u32.to_le_bytes()));
+            let _ = RegCloseKey(key);
+        }
+    }
+}

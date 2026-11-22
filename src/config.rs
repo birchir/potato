@@ -91,6 +91,8 @@ pub struct Config {
     pub cpu_boost_off: bool,
     /// hard CPU cap for each Remote Desktop window, mstsc.exe, in percent (0 = none)
     pub rdp_cpu_limit: u32,
+    /// Windows' Remote Desktop file has been seen patched for several sessions, so a revert gets a warning
+    pub rdp_patched: bool,
     /// turn the PC off at this time each day, "HH:MM" (empty = never)
     pub shutdown_at: String,
     /// a Windows notification each time a trim or clean frees RAM
@@ -117,7 +119,7 @@ impl Discord {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            accounts: BTreeMap::new(), cores_per_client: 0, trim_minutes: 5, clean_above: 0, restart_hours: 0, upload_kbps: 0, cpu_boost_off: false, rdp_cpu_limit: 0,
+            accounts: BTreeMap::new(), cores_per_client: 0, trim_minutes: 5, clean_above: 0, restart_hours: 0, upload_kbps: 0, cpu_boost_off: false, rdp_cpu_limit: 0, rdp_patched: false,
             shutdown_at: String::new(), notify: true, discord: Discord { webhook: String::new(), screenshots: true },
         }
     }
@@ -140,7 +142,7 @@ impl Config {
         }))).collect();
         serde_json::to_string_pretty(&json!({
             "accounts": accounts, "coresPerClient": self.cores_per_client, "trimMinutes": self.trim_minutes, "cleanAbove": self.clean_above,
-            "restartHours": self.restart_hours, "uploadKbps": self.upload_kbps, "cpuBoostOff": self.cpu_boost_off, "rdpCpuLimit": self.rdp_cpu_limit, "shutdownAt": self.shutdown_at, "notify": self.notify,
+            "restartHours": self.restart_hours, "uploadKbps": self.upload_kbps, "cpuBoostOff": self.cpu_boost_off, "rdpCpuLimit": self.rdp_cpu_limit, "rdpPatched": self.rdp_patched, "shutdownAt": self.shutdown_at, "notify": self.notify,
             "discord": { "webhook": self.discord.webhook, "screenshots": self.discord.screenshots },
         }))
         .unwrap()
@@ -180,6 +182,7 @@ impl Config {
             upload_kbps: num(&v["uploadKbps"], d.upload_kbps),
             cpu_boost_off: v["cpuBoostOff"].as_bool().unwrap_or(d.cpu_boost_off),
             rdp_cpu_limit: num(&v["rdpCpuLimit"], 0).min(100),
+            rdp_patched: v["rdpPatched"].as_bool().unwrap_or(d.rdp_patched),
             shutdown_at: v["shutdownAt"].as_str().and_then(parse_time).map(format_time).unwrap_or_default(),
             notify: v["notify"].as_bool().unwrap_or(d.notify),
             discord: Discord {
@@ -278,7 +281,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let mut c = Config { cores_per_client: 2, trim_minutes: 0, clean_above: 85, restart_hours: 6, upload_kbps: 512, cpu_boost_off: true, rdp_cpu_limit: 80,
+        let mut c = Config { cores_per_client: 2, trim_minutes: 0, clean_above: 85, restart_hours: 6, upload_kbps: 512, cpu_boost_off: true, rdp_cpu_limit: 80, rdp_patched: true,
                                 shutdown_at: "06:30".into(), notify: false, ..Config::default() };
         c.discord = Discord { webhook: "https://discord.com/api/webhooks/123/abc-DEF_9".into(), screenshots: false };
         c.account_mut("S-1-5-21-4").mute = true;
