@@ -56,6 +56,53 @@ pub struct Account {
     pub rejoin_crashed: bool,
 }
 
+/// One-click setups for an account, from the guides: alts that just need to stay in game, a middle ground, or
+/// Roblox left as it is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Preset {
+    MaxSavings,
+    Balanced,
+    FullQuality,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 3] = [Preset::MaxSavings, Preset::Balanced, Preset::FullQuality];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::MaxSavings => "Max Savings",
+            Preset::Balanced => "Balanced",
+            Preset::FullQuality => "Full Quality",
+        }
+    }
+
+    pub fn note(self) -> &'static str {
+        match self {
+            Preset::MaxSavings => "Alts: Ultra Low, 30 FPS, lower priority, muted",
+            Preset::Balanced => "Lowest graphics, 60 FPS, muted",
+            Preset::FullQuality => "Roblox as it comes: no cap, normal graphics",
+        }
+    }
+
+    /// (lowest graphics, Ultra Low, FPS cap, priority, mute)
+    fn values(self) -> (bool, bool, Option<u32>, Priority, bool) {
+        match self {
+            Preset::MaxSavings => (true, true, Some(30), Priority::BelowNormal, true),
+            Preset::Balanced => (true, false, Some(60), Priority::Normal, true),
+            Preset::FullQuality => (false, false, None, Priority::Normal, false),
+        }
+    }
+
+    pub fn apply(self, a: &mut Account) {
+        (a.plan.lowest_graphics, a.plan.ultra_low, a.plan.fps_cap, a.priority, a.mute) = self.values();
+    }
+
+    /// The preset an account matches, if any (anything changed by hand is "Custom").
+    pub fn of(a: &Account) -> Option<Preset> {
+        Preset::ALL.into_iter().find(|p| p.values() == (a.plan.lowest_graphics, a.plan.ultra_low, a.plan.fps_cap, a.priority, a.mute))
+    }
+}
+
 impl Default for Account {
     /// what an account gets before anyone changes it: lowest graphics at 30 FPS, opened maximized
     fn default() -> Self {
@@ -89,12 +136,6 @@ pub struct Config {
     pub restart_hours: u32,
     /// Roblox's upload speed limit in kbit/s (0 = none)
     pub upload_kbps: u32,
-    /// Windows' processor boost mode off: cores stay at base speed (less heat and CPU spikes)
-    pub cpu_boost_off: bool,
-    /// Windows' High Performance power plan active (off puts Balanced back)
-    pub high_performance: bool,
-    /// Windows' Fast Startup off (the guides turn it off before any BIOS or power change)
-    pub fast_startup_off: bool,
     /// hard CPU cap for each Remote Desktop window, mstsc.exe, in percent (0 = none)
     pub rdp_cpu_limit: u32,
     /// Windows' Remote Desktop file has been seen patched for several sessions, so a revert gets a warning
@@ -129,7 +170,7 @@ impl Discord {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            accounts: BTreeMap::new(), cores_per_client: 0, helper_cores: 0, trim_minutes: 5, clean_above: 0, restart_hours: 0, upload_kbps: 0, cpu_boost_off: false, high_performance: false, fast_startup_off: false, rdp_cpu_limit: 0, rdp_patched: false, rdp_startup: Vec::new(), rdp_wide: Vec::new(),
+            accounts: BTreeMap::new(), cores_per_client: 0, helper_cores: 0, trim_minutes: 5, clean_above: 0, restart_hours: 0, upload_kbps: 0, rdp_cpu_limit: 0, rdp_patched: false, rdp_startup: Vec::new(), rdp_wide: Vec::new(),
             shutdown_at: String::new(), notify: true, discord: Discord { webhook: String::new(), screenshots: true },
         }
     }
@@ -152,7 +193,7 @@ impl Config {
         }))).collect();
         serde_json::to_string_pretty(&json!({
             "accounts": accounts, "coresPerClient": self.cores_per_client, "helperCores": self.helper_cores, "trimMinutes": self.trim_minutes, "cleanAbove": self.clean_above,
-            "restartHours": self.restart_hours, "uploadKbps": self.upload_kbps, "cpuBoostOff": self.cpu_boost_off, "rdpCpuLimit": self.rdp_cpu_limit, "rdpPatched": self.rdp_patched, "rdpStartup": self.rdp_startup, "rdpWide": self.rdp_wide, "highPerformance": self.high_performance, "fastStartupOff": self.fast_startup_off, "shutdownAt": self.shutdown_at, "notify": self.notify,
+            "restartHours": self.restart_hours, "uploadKbps": self.upload_kbps, "rdpCpuLimit": self.rdp_cpu_limit, "rdpPatched": self.rdp_patched, "rdpStartup": self.rdp_startup, "rdpWide": self.rdp_wide, "shutdownAt": self.shutdown_at, "notify": self.notify,
             "discord": { "webhook": self.discord.webhook, "screenshots": self.discord.screenshots },
         }))
         .unwrap()
@@ -192,13 +233,10 @@ impl Config {
             clean_above: num(&v["cleanAbove"], d.clean_above),
             restart_hours: num(&v["restartHours"], d.restart_hours),
             upload_kbps: num(&v["uploadKbps"], d.upload_kbps),
-            cpu_boost_off: v["cpuBoostOff"].as_bool().unwrap_or(d.cpu_boost_off),
             rdp_cpu_limit: num(&v["rdpCpuLimit"], 0).min(100),
             rdp_patched: v["rdpPatched"].as_bool().unwrap_or(d.rdp_patched),
             rdp_startup: names(&v["rdpStartup"]),
             rdp_wide: names(&v["rdpWide"]),
-            high_performance: v["highPerformance"].as_bool().unwrap_or(d.high_performance),
-            fast_startup_off: v["fastStartupOff"].as_bool().unwrap_or(d.fast_startup_off),
             shutdown_at: v["shutdownAt"].as_str().and_then(parse_time).map(format_time).unwrap_or_default(),
             notify: v["notify"].as_bool().unwrap_or(d.notify),
             discord: Discord {
@@ -296,9 +334,19 @@ mod tests {
     }
 
     #[test]
+    fn presets_apply_and_are_recognised() {
+        let mut a = Account::default();
+        for p in Preset::ALL {
+            p.apply(&mut a);
+            assert_eq!(Preset::of(&a), Some(p));
+        }
+        a.plan.fps_cap = Some(45);
+        assert_eq!(Preset::of(&a), None, "changed by hand");
+    }
+
+    #[test]
     fn round_trips() {
-        let mut c = Config { cores_per_client: 2, helper_cores: 3, trim_minutes: 0, clean_above: 85, restart_hours: 6, upload_kbps: 512, cpu_boost_off: true, rdp_cpu_limit: 80, rdp_patched: true, rdp_startup: vec!["Alt1".into()], rdp_wide: vec!["Alt2".into()],
-                                high_performance: true, fast_startup_off: true,
+        let mut c = Config { cores_per_client: 2, helper_cores: 3, trim_minutes: 0, clean_above: 85, restart_hours: 6, upload_kbps: 512, rdp_cpu_limit: 80, rdp_patched: true, rdp_startup: vec!["Alt1".into()], rdp_wide: vec!["Alt2".into()],
                                 shutdown_at: "06:30".into(), notify: false, ..Config::default() };
         c.discord = Discord { webhook: "https://discord.com/api/webhooks/123/abc-DEF_9".into(), screenshots: false };
         c.account_mut("S-1-5-21-4").mute = true;

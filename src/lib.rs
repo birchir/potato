@@ -3,6 +3,7 @@ pub mod files;
 pub mod tweaks;
 pub mod version;
 pub mod app;
+pub mod widgets;
 pub mod engine;
 #[cfg(windows)]
 pub mod tray;
@@ -21,6 +22,7 @@ pub mod rejoin;
 pub mod report;
 pub mod card;
 pub mod rdp;
+pub mod power;
 pub mod preview_shared;
 #[cfg(windows)]
 pub mod preview;

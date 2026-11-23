@@ -36,7 +36,7 @@ fn save(h: &mut Harness<'static, potato::app::App>, name: &str) {
 fn draw_the_window() {
     let mut h = harness([1000.0, 760.0]);
     save(&mut h, "default");
-    h.get_by_label("Trim All Roblox").click();
+    h.get_by_label("Trim All").click();
     for _ in 0..40 {   // the trim runs on its own thread, then its result floats up
         std::thread::sleep(std::time::Duration::from_millis(50));
         h.run_steps(1);
@@ -44,11 +44,11 @@ fn draw_the_window() {
     save(&mut h, "toast");
     save(&mut harness([1920.0, 1000.0]), "maximized");
     let mut h = harness([1000.0, 1300.0]);
-    h.get_by_label("Performance").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Tab, "Performance").click();
     h.run_steps(4);
     save(&mut h, "whole-pc");
     let mut h = harness([1000.0, 1100.0]);
-    h.get_by_label("Remote Desktop").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Tab, "Remote").click();
     h.run_steps(4);
     save(&mut h, "rdp");
 }
@@ -64,61 +64,98 @@ fn saved() -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(data_dir().join("Potato").join("settings.json")).expect("settings saved")).unwrap()
 }
 
-/// Clicks and types through every new control like a person would, then checks what was saved.
+/// Clicks and types through every control like a person would, then checks what was saved.
 #[test]
 #[ignore]
 fn click_and_type_everywhere() {
+    use egui::accesskit::Role;
     let mut h = harness([1400.0, 1100.0]);
-    // Overview: trim one live tile
+    // Overview: trim one live tile, change the tile size
     h.get_all_by_label("Trim").next().expect("a tile with Trim").click();
-    steps(&mut h, 20);
-    assert!(h.query_by_label_contains("Trimmed Alt1").is_some(), "the tile's trim says what it freed");
+    let mut said = false;
+    for _ in 0..160 {   // the trim runs on its own thread: wait up to ~5 s for its result
+        steps(&mut h, 1);
+        if h.query_by_label_contains("Trimmed Alt1").is_some() {
+            said = true;
+            break;
+        }
+    }
+    assert!(said, "the tile's trim says what it freed");
+    h.get_by_role_and_label(Role::RadioButton, "Large").click();
+    steps(&mut h, 4);
     save(&mut h, "clicked-overview");
 
-    // an account: type an FPS cap
-    h.get_all_by_label("Alt1").next().unwrap().click();
+    // Accounts: open Alt1's card, pick a preset, then type an FPS cap over it
+    h.get_by_role_and_label(Role::Tab, "Accounts").click();
     steps(&mut h, 4);
+    save(&mut h, "clicked-accounts");
+    h.get_by_role_and_label(Role::Button, "Alt1").click();
+    steps(&mut h, 4);
+    h.get_by_role_and_label(Role::RadioButton, "Max Savings").click();
+    steps(&mut h, 4);
+    let a = &saved()["accounts"]["S-1-5-21-3"];
+    assert_eq!((a["ultraLow"].as_bool(), a["fpsCap"].as_u64(), a["priority"].as_str()), (Some(true), Some(30), Some("belowNormal")), "Max Savings");
     let fps = h.get_by_label("FPS Cap");
     fps.focus();
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
     h.get_by_label("FPS Cap").type_text("45 fps");
     steps(&mut h, 4);
     assert_eq!(saved()["accounts"]["S-1-5-21-3"]["fpsCap"], 45, "typing 45 fps saves 45");
-
-    // Performance: the guide's power switches and core split
-    h.get_by_label("Performance").click();
+    h.get_by_role_and_label(Role::RadioButton, "Low").click();   // priority
     steps(&mut h, 4);
-    h.get_by_role_and_label(egui::accesskit::Role::Switch, "High Performance Power Plan").click();
-    h.get_by_role_and_label(egui::accesskit::Role::Switch, "Turn Off Fast Startup").click();
-    steps(&mut h, 2);
+    assert_eq!(saved()["accounts"]["S-1-5-21-3"]["priority"], "idle");
+    save(&mut h, "clicked-account");
+
+    // Performance: the guide checklist's one button, then the core split by hand
+    h.get_by_role_and_label(Role::Tab, "Performance").click();
+    steps(&mut h, 10);
+    h.get_by_role_and_label(Role::Button, "Apply Recommended").click();
+    steps(&mut h, 30);
+    assert_eq!(saved()["helperCores"], 2, "Apply Recommended put Remote Desktops on their own cores");
+    let p = potato::power::read();
+    assert!(p.high_performance && p.boost_off && p.fast_startup_off, "and applied every power setting");
+    assert!(h.get_all_by_role_and_label(Role::Button, "Undo").count() >= 4, "done items offer Undo");
     h.get_by_label("Cores For Remote Desktop And Macros").click();
     steps(&mut h, 4);
-    h.get_by_label("Last 2 Cores").click();
+    h.get_by_label("Last 3 Cores").click();
     steps(&mut h, 4);
-    let s = saved();
-    assert_eq!((s["highPerformance"].as_bool(), s["fastStartupOff"].as_bool(), s["helperCores"].as_u64()), (Some(true), Some(true), Some(2)));
+    assert_eq!(saved()["helperCores"], 3);
     save(&mut h, "clicked-performance");
 
     // Remote Desktop: boosting size, a desktop shortcut, a new account typed in
-    h.get_by_label("Remote Desktop").click();
+    h.get_by_role_and_label(Role::Tab, "Remote").click();
     steps(&mut h, 6);
-    h.get_all_by_role(egui::accesskit::Role::ComboBox).next().expect("Alt1's size").click();
-    steps(&mut h, 4);
-    h.get_by_label("1800x768 (Boosting)").click();
+    h.get_all_by_role_and_label(Role::RadioButton, "1800x768 Boosting").next().expect("Alt1's size").click();
     steps(&mut h, 4);
     assert_eq!(saved()["rdpWide"], serde_json::json!(["Alt1"]));
     let file = std::fs::read_to_string(data_dir().join("Potato").join("rdp").join("Alt1.rdp")).expect("Alt1.rdp written");
-    for line in ["desktopwidth:i:1800", "audiomode:i:2", "redirectdrives:i:0", "disable wallpaper:i:1", "keyboardhook:i:1"] {
+    for line in ["desktopwidth:i:1800", "audiomode:i:2", "redirectdrives:i:0", "disable wallpaper:i:1", "keyboardhook:i:0"] {
         assert!(file.contains(line), "{line}");
     }
     h.get_all_by_label("Desktop Shortcut").next().unwrap().click();
     steps(&mut h, 6);
     assert!(h.query_by_label_contains("On Your Desktop").is_some(), "the shortcut says where it went");
-    h.get_by_label("New Account").type_text("Alt3");
-    h.get_by_label("Its Password").type_text("Potato123!");
+    h.get_by_role_and_label(Role::TextInput, "Name").focus();
+    steps(&mut h, 2);
+    h.get_by_role_and_label(Role::TextInput, "Name").type_text("Alt3");
+    h.get_by_role_and_label(Role::PasswordInput, "Password").focus();
+    steps(&mut h, 2);
+    h.get_by_role_and_label(Role::PasswordInput, "Password").type_text("Potato123!");
+    steps(&mut h, 2);
+    assert_eq!(h.get_by_role_and_label(Role::TextInput, "Name").value().as_deref(), Some("Alt3"), "the name was typed");
     steps(&mut h, 4);
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Make It").click();
+    h.get_by_role_and_label(Role::Button, "Make It").click();
     steps(&mut h, 30);
-    assert_eq!(h.get_by_label("New Account").value().as_deref(), Some(""), "the name box clears once the account is made");
+    assert_eq!(h.get_by_role_and_label(Role::TextInput, "Name").value().as_deref(), Some(""), "the name box clears once the account is made");
     save(&mut h, "clicked-rdp");
+
+    // Settings: a wrong webhook is caught as it's typed
+    h.get_by_role_and_label(Role::Tab, "Settings").click();
+    steps(&mut h, 4);
+    h.get_by_label("Webhook").focus();
+    steps(&mut h, 2);
+    h.get_by_label("Webhook").type_text("https://example.com/not-discord");
+    steps(&mut h, 4);
+    save(&mut h, "clicked-settings");
+    assert!(h.query_by_label("Not a Discord webhook").is_some());
 }

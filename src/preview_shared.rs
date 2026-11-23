@@ -24,10 +24,18 @@ pub fn rdp_title(name: &str) -> String {
     format!("{name} - Remote Desktop")
 }
 
-/// Which account a Remote Desktop window is signed in to: by Potato's title, or Windows' own "<address> - ...".
+/// Which account a Remote Desktop window is signed in to, from its title: Potato's "<name> - Remote Desktop",
+/// RDP Plus's `/title:"<name>"`, or Windows' own "<address> - Remote Desktop Connection" ("<file> - <address> - ..."
+/// when opened from an .rdp file).
 pub fn rdp_account(title: &str, accounts: &[String]) -> Option<String> {
-    // Windows titles it "<address> - Remote Desktop Connection", or "<file> - <address> - ..." when opened from an .rdp file
-    accounts.iter().find(|n| title == rdp_title(n) || title.split(" - ").any(|part| part == crate::rdp::address(n))).cloned()
+    let parts: Vec<&str> = title.split(" - ").map(str::trim).collect();
+    accounts.iter().find(|n| parts.iter().any(|p| p.eq_ignore_ascii_case(n) || *p == crate::rdp::address(n))).cloned()
+}
+
+/// What to call a Remote Desktop window no account matches: its title without Windows' " - Remote Desktop Connection".
+pub fn rdp_label(title: &str) -> String {
+    let t = title.trim_end_matches(" - Remote Desktop Connection").trim();
+    if t.is_empty() { "Remote Desktop".into() } else { t.to_string() }
 }
 
 /// Fit a `src` sized picture inside `tile` (keeping its shape, centered), then cut it to `clip`. Returns where it
@@ -71,5 +79,9 @@ mod tests {
         assert_eq!(rdp_account("Alt1 - Remote Desktop", &names), Some("Alt1".into()));
         assert_eq!(rdp_account(&format!("Alt2 - {addr} - Remote Desktop Connection"), &names), Some("Alt2".into()), "opened from Alt2.rdp");
         assert_eq!(rdp_account("192.168.1.5 - Remote Desktop Connection", &names), None);
+        assert_eq!(rdp_account("Alt2", &names), Some("Alt2".into()), "RDP Plus /title:\"Alt2\"");
+        assert_eq!(rdp_account("alt1", &names), Some("Alt1".into()));
+        assert_eq!(rdp_account("Alt10", &names), None, "not a different account's name");
+        assert_eq!(rdp_label("127.0.0.9 - Remote Desktop Connection"), "127.0.0.9");
     }
 }

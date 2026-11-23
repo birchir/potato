@@ -179,8 +179,8 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' fDenyT
     if system::save_rdp_login(&address(name), name, password) { Ok(()) } else { Err("Made It, But Couldn't Save Its Login".into()) }
 }
 
-/// The account's Remote Desktop settings, as the guides set them up for RDP Plus
-/// (`/nodrives /nosound /nowallpaper /o:"keyboardhook:i:1" /w:1366 /h:768`), written as an .rdp file because
+/// The account's Remote Desktop settings, as the user's RDP Plus shortcuts set them up
+/// (`/title:"Alt2" /nodrives /nosound /nowallpaper /o:"keyboardhook:i:0" /w:1366 /h:768`), written as an .rdp file because
 /// Windows' own Remote Desktop only takes those as file settings. `wide` is the guide's 1800x768 for boosting and
 /// Honeyday (movespeed correction breaks in narrower windows).
 pub fn rdp_file(name: &str, wide: bool) -> String {
@@ -197,7 +197,7 @@ pub fn rdp_file(name: &str, wide: bool) -> String {
         "redirectprinters:i:0".into(),
         "redirectclipboard:i:1".into(),
         "disable wallpaper:i:1".into(),   // /nowallpaper
-        "keyboardhook:i:1".into(),        // /o:"keyboardhook:i:1"
+        "keyboardhook:i:0".into(),        // /o:"keyboardhook:i:0": Windows key shortcuts stay on this PC, not the alt
         "prompt for credentials:i:0".into(),
         "authentication level:i:0".into(),
     ].join("\r\n") + "\r\n"
@@ -320,7 +320,7 @@ mod tests {
     fn rdp_file_has_every_guide_setting() {
         let f = rdp_file("Alt1", false);
         for line in ["username:s:Alt1", "desktopwidth:i:1366", "desktopheight:i:768", "audiomode:i:2", "redirectdrives:i:0",
-                     "disable wallpaper:i:1", "keyboardhook:i:1", &format!("full address:s:{}", address("Alt1"))] {
+                     "disable wallpaper:i:1", "keyboardhook:i:0", &format!("full address:s:{}", address("Alt1"))] {
             assert!(f.split("\r\n").any(|l| l == line), "{line}");
         }
         assert!(rdp_file("Alt1", true).contains("desktopwidth:i:1800\r\n"));

@@ -12,14 +12,15 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow, SetWindowTextW, ShowWindow,
+    EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow, SetWindowTextW, ShowWindow,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR};
 
 pub use crate::preview_shared::*;
 
-/// Every top-level window that's a Roblox client in this login or a Remote Desktop window.
-fn top_windows() -> Vec<(isize, u32, String, String)> {
+/// Every top-level window that's a Roblox client in this login or a Remote Desktop window. Remote Desktop
+/// windows are found by their window class, so ones opened by RDP Plus or any other launcher count too.
+fn top_windows() -> Vec<(isize, u32, bool, String)> {
     let mut hwnds: Vec<isize> = Vec::new();
     unsafe extern "system" fn add(hwnd: HWND, out: LPARAM) -> BOOL {
         if unsafe { IsWindowVisible(hwnd).as_bool() } {
@@ -34,8 +35,9 @@ fn top_windows() -> Vec<(isize, u32, String, String)> {
     hwnds.into_iter().filter_map(|h| {
         let mut pid = 0;
         unsafe { GetWindowThreadProcessId(HWND(h as *mut _), Some(&mut pid)) };
+        let rdp = class(h) == RDP_CLASS;
         let exe = exe_of.entry(pid).or_insert_with(|| exe_name(pid)).clone();
-        (exe == "robloxplayerbeta.exe" || exe == "mstsc.exe").then(|| (h, pid, exe, title(h)))
+        (rdp || exe == "robloxplayerbeta.exe").then(|| (h, pid, rdp, title(h)))
     }).collect()
 }
 
@@ -52,6 +54,15 @@ fn exe_name(pid: u32) -> String {
     path.rsplit('\\').next().unwrap_or_default().to_string()
 }
 
+/// The window class of every Windows Remote Desktop window (mstsc), whatever opened it.
+const RDP_CLASS: &str = "TscShellContainerClass";
+
+fn class(h: isize) -> String {
+    let mut buf = [0u16; 128];
+    let n = unsafe { GetClassNameW(HWND(h as *mut _), &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
 fn title(h: isize) -> String {
     let mut buf = [0u16; 256];
     let n = unsafe { GetWindowTextW(HWND(h as *mut _), &mut buf) };
@@ -60,20 +71,19 @@ fn title(h: isize) -> String {
 
 /// The windows to preview: each Remote Desktop window (matched to its account) and each Roblox window on this desktop.
 pub fn windows(accounts: &[String]) -> Vec<Win> {
-    top_windows().into_iter().filter_map(|(hwnd, pid, exe, t)| {
-        let kind = if exe == "mstsc.exe" { Kind::Rdp(rdp_account(&t, accounts)?) } else { Kind::Roblox };
-        Some(Win { hwnd, pid, kind, minimized: unsafe { IsIconic(HWND(hwnd as *mut _)).as_bool() } })
+    top_windows().into_iter().map(|(hwnd, pid, rdp, t)| {
+        // a Remote Desktop no account matches still shows, under its own title
+        let kind = if rdp { Kind::Rdp(rdp_account(&t, accounts).unwrap_or_else(|| rdp_label(&t))) } else { Kind::Roblox };
+        Win { hwnd, pid, kind, minimized: unsafe { IsIconic(HWND(hwnd as *mut _)).as_bool() } }
     }).collect()
 }
 
 /// Give each Remote Desktop window its account's name, like the guide's RDP Plus `/title:` (Windows' own
 /// Remote Desktop shows only the 127.x address). Run every tick: mstsc sets its title again when it reconnects.
 pub fn name_rdp_windows(accounts: &[String]) {
-    for (hwnd, _, exe, t) in top_windows() {
-        if exe != "mstsc.exe" {
-            continue;
-        }
-        if let Some(name) = rdp_account(&t, accounts) && t != rdp_title(&name) {
+    for (hwnd, _, rdp, t) in top_windows() {
+        // only Windows' own "<address> - ..." titles: a title someone set (RDP Plus /title:) stays
+        if rdp && let Some(name) = rdp_account(&t, accounts) && t.split(" - ").any(|p| p == crate::rdp::address(&name)) {
             let wide: Vec<u16> = rdp_title(&name).encode_utf16().chain([0]).collect();
             unsafe {
                 let _ = SetWindowTextW(HWND(hwnd as *mut _), PCWSTR(wide.as_ptr()));

@@ -93,14 +93,14 @@ pub struct Engine {
     /// crashed clients waiting a moment in case something else reopens them: (account, server, when)
     crashed: Vec<(String, rejoin::Server, Instant)>,
     upload_applied: Option<u32>,
-    boost_applied: Option<bool>,
-    /// (High Performance plan, Fast Startup off) as last set
-    power_applied: Option<(bool, bool)>,
+    /// every account's .rdp file has been rewritten since Potato started (desktop shortcuts open them as they are)
+    rdp_files_written: bool,
     shutdown_done: Option<u32>,
     /// the clock hour (0-23) the last scheduled report went out in, so each hour sends exactly one
     reported_hour: u32,
     /// a look at RAM and CPU every 30 seconds since the last report, for the report's graphs
-    history: Vec<crate::report::Sample>,
+    /// RAM and CPU every 30 s since the last report (the Overview chart and the hourly report)
+    pub history: Vec<crate::report::Sample>,
     history_start: Instant,
     /// a report waiting for the helpers' screenshots: (request id, when asked)
     report_pending: Option<(u64, Instant)>,
@@ -152,8 +152,7 @@ impl Engine {
             whereabouts: HashMap::new(),
             crashed: Vec::new(),
             upload_applied: None,
-            boost_applied: None,
-            power_applied: None,
+            rdp_files_written: false,
             shutdown_done: None,
             reported_hour: system::local_minutes() / 60,   // the first report waits for the next full hour
             history: Vec::new(),
@@ -268,8 +267,12 @@ impl Engine {
         self.apply_upload_cap();
         let accounts = self.rdp.lock().unwrap().accounts.clone();
         crate::preview::name_rdp_windows(&accounts);
-        self.apply_power();
-        self.apply_cpu_boost();
+        if !self.rdp_files_written && !accounts.is_empty() {
+            for n in &accounts {
+                let _ = crate::rdp::write_file(n, self.config.rdp_wide.contains(n));
+            }
+            self.rdp_files_written = true;
+        }
         self.shutdown_on_time();
         self.report();
         let hours = self.config.restart_hours;
@@ -439,60 +442,6 @@ impl Engine {
         }
         if !system::run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]) && want > 0 {
             self.note = "Couldn't Set The Upload Cap".into();
-        }
-    }
-
-    /// Processor boost mode on the active power plan (plugged in and on battery), set only when the switch changes.
-    fn apply_cpu_boost(&mut self) {
-        let want = self.config.cpu_boost_off;
-        let first = self.boost_applied.is_none();
-        if self.boost_applied == Some(want) {
-            return;
-        }
-        self.boost_applied = Some(want);
-        if first && !want {
-            return;   // never touch a PC whose owner didn't ask
-        }
-        // shortcut: "on" writes 2 (Aggressive, Windows' default) instead of the plan's old value; read it first if anyone had a custom one
-        let mode = if want { "0" } else { "2" };
-        if want {   // the guide's "Attributes = 2": shows Processor performance boost mode in Power Options
-            system::run("powercfg", &["-attributes", "SUB_PROCESSOR", "PERFBOOSTMODE", "-ATTRIB_HIDE"]);
-        }
-        let ok = ["/setacvalueindex", "/setdcvalueindex"].iter()
-            .all(|set| system::run("powercfg", &[set, "SCHEME_CURRENT", "SUB_PROCESSOR", "PERFBOOSTMODE", mode]))
-            && system::run("powercfg", &["/setactive", "SCHEME_CURRENT"]);
-        if !ok {
-            self.note = "Couldn't Change CPU Boost".into();
-        }
-    }
-
-    /// The guide's power settings, set only when a switch changes (and never on a PC whose owner didn't turn one on).
-    fn apply_power(&mut self) {
-        let want = (self.config.high_performance, self.config.fast_startup_off);
-        let had = self.power_applied.replace(want).unwrap_or((false, false));
-        if had == want {
-            return;
-        }
-        if want.0 != had.0 {
-            // shortcut: off goes back to Balanced, not whatever plan was on before; remember the old plan if people use custom ones
-            const PLAN: &str = r#"
-$g = $env:POTATO_PLAN
-powercfg /setactive $g 2>$null
-if ($LASTEXITCODE -ne 0) {
-    # laptops and Modern Standby PCs hide High Performance: copy Windows' built-in one
-    $o = powercfg -duplicatescheme $g
-    if ("$o" -match '[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}') { powercfg /setactive $Matches[0] } else { exit 1 }
-}
-"#;
-            let plan = if want.0 { "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" } else { "381b4222-f694-41f0-9685-ff5bb260df2e" };
-            if system::powershell(PLAN, &[("POTATO_PLAN", plan)]).is_err() {
-                self.note = "Couldn't Change The Power Plan".into();
-            }
-            self.boost_applied = None;   // CPU boost is a setting of the plan: put it on the new one too
-        }
-        if want.1 != had.1 && !system::run("reg", &["add", r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power", "/v", "HiberbootEnabled",
-                                                     "/t", "REG_DWORD", "/d", if want.1 { "0" } else { "1" }, "/f"]) {
-            self.note = "Couldn't Change Fast Startup".into();
         }
     }
 

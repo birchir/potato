@@ -49,7 +49,7 @@ Closing the window keeps Potato running in the tray. New versions install themse
 | **Trim RAM** | Moves memory Roblox isn't using to the page file, on a timer or a click, and empties Windows' standby memory when RAM gets full. |
 | **Live previews** | The Overview shows every Remote Desktop and Roblox window live, with its RAM and CPU. Click one to bring it to the front, or trim it. |
 | **CPU control** | Priority, a hard CPU limit per client, its own CPU cores and Windows 11 Efficiency Mode. Remote Desktop windows and AutoHotkey can get their own cores, away from Roblox. |
-| **Power settings** | Windows' High Performance plan, CPU boost off and Fast Startup off, each on a switch that puts Windows' own setting back when you turn it off. |
+| **Power settings** | Windows' High Performance plan, CPU boost off and Fast Startup off, each with an Apply button and an Undo button that puts Windows' own setting back. The Performance page lists every step from the guides with one Apply Recommended button. |
 | **Restart into the same server** | Closes clients and reopens each one in the server it was in, public or private. On a click, every few hours, or when a client grows past a memory limit you set. |
 | **Clean up after outages** | One Client Only closes the older copy when a second Roblox opens on the same account. Rejoin After A Crash reopens a client that closed by itself. |
 | **Open maximized** | Every Roblox window fills the screen with its title bar kept, in every RDP login. |
