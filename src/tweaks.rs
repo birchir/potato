@@ -175,9 +175,31 @@ pub fn core_masks(clients: usize, cores: usize, per: usize) -> Vec<u64> {
         .collect()
 }
 
+/// The guide's core split: the last `helpers` logical cores go to Remote Desktop windows and macros, the rest to
+/// Roblox. Returns (cores left for Roblox, the helpers' mask). Roblox always keeps at least one core.
+pub fn split_cores(cores: usize, helpers: usize) -> (usize, u64) {
+    let cores = cores.clamp(1, 64);
+    let helpers = helpers.min(cores - 1);
+    (cores - helpers, (0..helpers).fold(0u64, |m, k| m | 1 << (cores - 1 - k)))
+}
+
+/// Every core in the first `n`.
+pub fn first_cores(n: usize) -> u64 {
+    if n >= 64 { u64::MAX } else { (1u64 << n) - 1 }
+}
+
 #[cfg(test)]
 mod core_tests {
-    use super::core_masks;
+    use super::{core_masks, first_cores, split_cores};
+
+    #[test]
+    fn helpers_get_the_last_cores() {
+        assert_eq!(split_cores(8, 2), (6, 0b1100_0000));
+        assert_eq!(split_cores(8, 0), (8, 0));
+        assert_eq!(split_cores(2, 3), (1, 0b10), "Roblox keeps a core");
+        assert_eq!(first_cores(6), 0b11_1111);
+        assert_eq!(first_cores(64), u64::MAX);
+    }
 
     #[test]
     fn each_client_gets_its_own_cores() {

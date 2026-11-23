@@ -79,6 +79,8 @@ pub struct Config {
     pub accounts: BTreeMap<String, Account>,
     /// logical cores each client gets to itself (0 = off: Windows decides)
     pub cores_per_client: u32,
+    /// the last logical cores kept for Remote Desktop windows and AutoHotkey macros, away from Roblox (0 = off)
+    pub helper_cores: u32,
     /// trim every Roblox client this often (0 = off)
     pub trim_minutes: u32,
     /// empty the standby list when RAM in use goes over this percent (0 = off)
@@ -89,12 +91,18 @@ pub struct Config {
     pub upload_kbps: u32,
     /// Windows' processor boost mode off: cores stay at base speed (less heat and CPU spikes)
     pub cpu_boost_off: bool,
+    /// Windows' High Performance power plan active (off puts Balanced back)
+    pub high_performance: bool,
+    /// Windows' Fast Startup off (the guides turn it off before any BIOS or power change)
+    pub fast_startup_off: bool,
     /// hard CPU cap for each Remote Desktop window, mstsc.exe, in percent (0 = none)
     pub rdp_cpu_limit: u32,
     /// Windows' Remote Desktop file has been seen patched for several sessions, so a revert gets a warning
     pub rdp_patched: bool,
     /// Remote Desktop accounts opened when you sign in to Windows
     pub rdp_startup: Vec<String>,
+    /// Remote Desktop accounts that open at 1800x768 (the guide's size for boosting and Honeyday) instead of 1366x768
+    pub rdp_wide: Vec<String>,
     /// turn the PC off at this time each day, "HH:MM" (empty = never)
     pub shutdown_at: String,
     /// a Windows notification each time a trim or clean frees RAM
@@ -121,7 +129,7 @@ impl Discord {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            accounts: BTreeMap::new(), cores_per_client: 0, trim_minutes: 5, clean_above: 0, restart_hours: 0, upload_kbps: 0, cpu_boost_off: false, rdp_cpu_limit: 0, rdp_patched: false, rdp_startup: Vec::new(),
+            accounts: BTreeMap::new(), cores_per_client: 0, helper_cores: 0, trim_minutes: 5, clean_above: 0, restart_hours: 0, upload_kbps: 0, cpu_boost_off: false, high_performance: false, fast_startup_off: false, rdp_cpu_limit: 0, rdp_patched: false, rdp_startup: Vec::new(), rdp_wide: Vec::new(),
             shutdown_at: String::new(), notify: true, discord: Discord { webhook: String::new(), screenshots: true },
         }
     }
@@ -143,8 +151,8 @@ impl Config {
             "mute": a.mute, "cpuLimit": a.cpu_limit, "ramLimitMb": a.ram_limit_mb, "rejoinCrashed": a.rejoin_crashed,
         }))).collect();
         serde_json::to_string_pretty(&json!({
-            "accounts": accounts, "coresPerClient": self.cores_per_client, "trimMinutes": self.trim_minutes, "cleanAbove": self.clean_above,
-            "restartHours": self.restart_hours, "uploadKbps": self.upload_kbps, "cpuBoostOff": self.cpu_boost_off, "rdpCpuLimit": self.rdp_cpu_limit, "rdpPatched": self.rdp_patched, "rdpStartup": self.rdp_startup, "shutdownAt": self.shutdown_at, "notify": self.notify,
+            "accounts": accounts, "coresPerClient": self.cores_per_client, "helperCores": self.helper_cores, "trimMinutes": self.trim_minutes, "cleanAbove": self.clean_above,
+            "restartHours": self.restart_hours, "uploadKbps": self.upload_kbps, "cpuBoostOff": self.cpu_boost_off, "rdpCpuLimit": self.rdp_cpu_limit, "rdpPatched": self.rdp_patched, "rdpStartup": self.rdp_startup, "rdpWide": self.rdp_wide, "highPerformance": self.high_performance, "fastStartupOff": self.fast_startup_off, "shutdownAt": self.shutdown_at, "notify": self.notify,
             "discord": { "webhook": self.discord.webhook, "screenshots": self.discord.screenshots },
         }))
         .unwrap()
@@ -154,6 +162,7 @@ impl Config {
     pub fn from_json(text: &str) -> Config {
         let d = Config::default();
         let Ok(v) = serde_json::from_str::<Value>(text) else { return d };
+        let names = |v: &Value| -> Vec<String> { v.as_array().map(|a| a.iter().filter_map(|n| n.as_str()).filter(|n| crate::rdp::valid_name(n)).map(String::from).collect()).unwrap_or_default() };
         let num = |v: &Value, or: u32| v.as_u64().map(|n| n as u32).unwrap_or(or);
         let accounts = v["accounts"].as_object().map(|m| m.iter().map(|(sid, a)| {
             let base = Account::default();
@@ -178,6 +187,7 @@ impl Config {
         Config {
             accounts,
             cores_per_client: num(&v["coresPerClient"], d.cores_per_client),
+            helper_cores: num(&v["helperCores"], 0).min(4),
             trim_minutes: num(&v["trimMinutes"], d.trim_minutes),
             clean_above: num(&v["cleanAbove"], d.clean_above),
             restart_hours: num(&v["restartHours"], d.restart_hours),
@@ -185,7 +195,10 @@ impl Config {
             cpu_boost_off: v["cpuBoostOff"].as_bool().unwrap_or(d.cpu_boost_off),
             rdp_cpu_limit: num(&v["rdpCpuLimit"], 0).min(100),
             rdp_patched: v["rdpPatched"].as_bool().unwrap_or(d.rdp_patched),
-            rdp_startup: v["rdpStartup"].as_array().map(|a| a.iter().filter_map(|n| n.as_str()).filter(|n| crate::rdp::valid_name(n)).map(String::from).collect()).unwrap_or_default(),
+            rdp_startup: names(&v["rdpStartup"]),
+            rdp_wide: names(&v["rdpWide"]),
+            high_performance: v["highPerformance"].as_bool().unwrap_or(d.high_performance),
+            fast_startup_off: v["fastStartupOff"].as_bool().unwrap_or(d.fast_startup_off),
             shutdown_at: v["shutdownAt"].as_str().and_then(parse_time).map(format_time).unwrap_or_default(),
             notify: v["notify"].as_bool().unwrap_or(d.notify),
             discord: Discord {
@@ -284,7 +297,8 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let mut c = Config { cores_per_client: 2, trim_minutes: 0, clean_above: 85, restart_hours: 6, upload_kbps: 512, cpu_boost_off: true, rdp_cpu_limit: 80, rdp_patched: true, rdp_startup: vec!["Alt1".into()],
+        let mut c = Config { cores_per_client: 2, helper_cores: 3, trim_minutes: 0, clean_above: 85, restart_hours: 6, upload_kbps: 512, cpu_boost_off: true, rdp_cpu_limit: 80, rdp_patched: true, rdp_startup: vec!["Alt1".into()], rdp_wide: vec!["Alt2".into()],
+                                high_performance: true, fast_startup_off: true,
                                 shutdown_at: "06:30".into(), notify: false, ..Config::default() };
         c.discord = Discord { webhook: "https://discord.com/api/webhooks/123/abc-DEF_9".into(), screenshots: false };
         c.account_mut("S-1-5-21-4").mute = true;

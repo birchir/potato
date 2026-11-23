@@ -21,3 +21,9 @@ pub mod rejoin;
 pub mod report;
 pub mod card;
 pub mod rdp;
+pub mod preview_shared;
+#[cfg(windows)]
+pub mod preview;
+#[cfg(not(windows))]
+#[path = "preview_demo.rs"]
+pub mod preview;

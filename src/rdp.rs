@@ -179,18 +179,74 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' fDenyT
     if system::save_rdp_login(&address(name), name, password) { Ok(()) } else { Err("Made It, But Couldn't Save Its Login".into()) }
 }
 
-/// Open the account's Remote Desktop window (the light settings from the user's guides: 1366x768, no sound, no
-/// drives, no wallpaper).
-pub fn open(name: &str) -> Result<(), String> {
+/// The account's Remote Desktop settings, as the guides set them up for RDP Plus
+/// (`/nodrives /nosound /nowallpaper /o:"keyboardhook:i:1" /w:1366 /h:768`), written as an .rdp file because
+/// Windows' own Remote Desktop only takes those as file settings. `wide` is the guide's 1800x768 for boosting and
+/// Honeyday (movespeed correction breaks in narrower windows).
+pub fn rdp_file(name: &str, wide: bool) -> String {
+    let (w, h) = if wide { (1800, 768) } else { (1366, 768) };
+    [
+        format!("full address:s:{}", address(name)),
+        format!("username:s:{name}"),
+        "screen mode id:i:1".into(),
+        format!("desktopwidth:i:{w}"),
+        format!("desktopheight:i:{h}"),
+        "audiomode:i:2".into(),           // /nosound
+        "redirectdrives:i:0".into(),      // /nodrives
+        "drivestoredirect:s:".into(),
+        "redirectprinters:i:0".into(),
+        "redirectclipboard:i:1".into(),
+        "disable wallpaper:i:1".into(),   // /nowallpaper
+        "keyboardhook:i:1".into(),        // /o:"keyboardhook:i:1"
+        "prompt for credentials:i:0".into(),
+        "authentication level:i:0".into(),
+    ].join("\r\n") + "\r\n"
+}
+
+/// Where an account's .rdp file lives (Potato's folder), written fresh with its current settings.
+pub fn write_file(name: &str, wide: bool) -> Result<PathBuf, String> {
     let dir = store().join("rdp");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = dir.join(format!("{name}.rdp"));
-    let text = format!("full address:s:{}\r\nusername:s:{name}\r\nscreen mode id:i:1\r\ndesktopwidth:i:1366\r\ndesktopheight:i:768\r\n\
-        audiomode:i:2\r\nredirectdrives:i:0\r\nredirectprinters:i:0\r\nredirectclipboard:i:1\r\ndisable wallpaper:i:1\r\n\
-        prompt for credentials:i:0\r\nauthentication level:i:0\r\n", address(name));
-    std::fs::write(&file, text).map_err(|e| e.to_string())?;
+    std::fs::write(&file, rdp_file(name, wide)).map_err(|e| e.to_string())?;
     system::trust_rdp_file(&address(name));
+    Ok(file)
+}
+
+/// Open the account's Remote Desktop window.
+pub fn open(name: &str, wide: bool) -> Result<(), String> {
+    let file = write_file(name, wide)?;
     std::process::Command::new("mstsc").arg(&file).spawn().map(|_| ()).map_err(|_| "Couldn't Open Remote Desktop".into())
+}
+
+/// A desktop shortcut that opens the account straight in Windows' Remote Desktop with its .rdp file (every guide
+/// setting is in the file, so the shortcut works without Potato running).
+pub fn desktop_shortcut(name: &str, wide: bool) -> Result<(), String> {
+    let file = write_file(name, wide)?;
+    const MAKE: &str = r#"
+$ErrorActionPreference = 'Stop'
+$lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) ($env:POTATO_NAME + ' (Remote Desktop).lnk')
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+$s.TargetPath = "$env:windir\System32\mstsc.exe"
+$s.Arguments = '"' + $env:POTATO_RDP + '"'
+$s.WorkingDirectory = Split-Path $env:POTATO_RDP
+$s.IconLocation = "$env:windir\System32\mstsc.exe,0"
+$s.Description = "Opens $env:POTATO_NAME in Remote Desktop with Potato's light settings"
+$s.Save()
+"#;
+    system::powershell(MAKE, &[("POTATO_NAME", name), ("POTATO_RDP", &file.to_string_lossy())]).map(|_| ())
+        .map_err(|_| "Couldn't Make The Shortcut".into())
+}
+
+/// How many Remote Desktops the guide says this PC can run steadily: the lower of its CPU and RAM tests.
+/// CPU: cores - 2, or (logical processors - 4) / 2 when those aren't one or two a core (newer Intel). RAM: 4 GB
+/// each, after 4 GB for Windows (8 GB from 32 GB of RAM up), rounded down.
+pub fn capacity(cores: usize, logical: usize, ram_gb: f64) -> (usize, usize) {
+    // one or two threads a core: cores - 2; newer Intel (performance and efficiency cores) has neither
+    let cpu = if logical == cores || logical == cores * 2 { cores.saturating_sub(2) } else { logical.saturating_sub(4) / 2 };
+    let reserve = if ram_gb >= 30.0 { 8.0 } else { 4.0 };   // a 32 GB PC shows about 31 GB: the guide's own 31.3 GB example keeps 8
+    let ram = ((ram_gb - reserve) / 4.0).floor().max(0.0) as usize;
+    (cpu, ram)
 }
 
 const STARTUP_TASK: &str = "Potato Open Remote Desktops";
@@ -216,7 +272,7 @@ pub fn save_startup(any: bool) -> bool {
 pub fn open_startup() {
     let config = std::fs::read_to_string(crate::engine::config_path()).map(|t| crate::config::Config::from_json(&t)).unwrap_or_default();
     for name in &config.rdp_startup {
-        let _ = open(name);
+        let _ = open(name, config.rdp_wide.contains(name));
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
 }
@@ -258,6 +314,25 @@ mod tests {
         let xml = startup_task("S-1-5-21-9", Path::new("C:\\P\\Potato.exe"), true).unwrap();
         assert!(xml.contains("<UserId>S-1-5-21-9</UserId><Delay>"));
         assert!(xml.contains("<Command>C:\\P\\Potato.exe</Command><Arguments>--open-rdp</Arguments>"));
+    }
+
+    #[test]
+    fn rdp_file_has_every_guide_setting() {
+        let f = rdp_file("Alt1", false);
+        for line in ["username:s:Alt1", "desktopwidth:i:1366", "desktopheight:i:768", "audiomode:i:2", "redirectdrives:i:0",
+                     "disable wallpaper:i:1", "keyboardhook:i:1", &format!("full address:s:{}", address("Alt1"))] {
+            assert!(f.split("\r\n").any(|l| l == line), "{line}");
+        }
+        assert!(rdp_file("Alt1", true).contains("desktopwidth:i:1800\r\n"));
+    }
+
+    #[test]
+    fn capacity_follows_the_guide() {
+        assert_eq!(capacity(8, 16, 31.3), (6, 5));    // the guide's own examples: 8 cores, 31.3 GB
+        assert_eq!(capacity(14, 20, 64.0), (8, 14));  // 20 logical, not double: (20 - 4) / 2
+        assert_eq!(capacity(2, 4, 8.0), (0, 1));
+        assert_eq!(capacity(4, 8, 3.0), (2, 0));
+        assert_eq!(capacity(4, 4, 8.0), (2, 1), "no hyper-threading: still cores - 2");
     }
 
     #[test]

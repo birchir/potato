@@ -47,12 +47,14 @@ Closing the window keeps Potato running in the tray. New versions install themse
 | **Lowest graphics and an FPS cap** | Uses Roblox's own Graphics Quality and Maximum Frame Rate settings, per account, and puts them back every time Roblox rewrites them. |
 | **Ultra Low** | Every Fast Flag Roblox still accepts that lowers quality: lowest textures, no grass, blockier shapes, a gray sky and frozen lighting. |
 | **Trim RAM** | Moves memory Roblox isn't using to the page file, on a timer or a click, and empties Windows' standby memory when RAM gets full. |
-| **CPU control** | Priority, a hard CPU limit per client, its own CPU cores and Windows 11 Efficiency Mode. |
+| **Live previews** | The Overview shows every Remote Desktop and Roblox window live, with its RAM and CPU. Click one to bring it to the front, or trim it. |
+| **CPU control** | Priority, a hard CPU limit per client, its own CPU cores and Windows 11 Efficiency Mode. Remote Desktop windows and AutoHotkey can get their own cores, away from Roblox. |
+| **Power settings** | Windows' High Performance plan, CPU boost off and Fast Startup off, each on a switch that puts Windows' own setting back when you turn it off. |
 | **Restart into the same server** | Closes clients and reopens each one in the server it was in, public or private. On a click, every few hours, or when a client grows past a memory limit you set. |
 | **Clean up after outages** | One Client Only closes the older copy when a second Roblox opens on the same account. Rejoin After A Crash reopens a client that closed by itself. |
 | **Open maximized** | Every Roblox window fills the screen with its title bar kept, in every RDP login. |
 | **Discord reports** | Posts each account's RAM, CPU, uptime, freezes and restarts to a Discord webhook, with a screenshot of each RDP's Roblox. |
-| **Remote Desktop alts** | Patches Windows so every account can be on at once, warns you when an update undoes it, makes new alt accounts and opens each one with no password box. |
+| **Remote Desktop alts** | Patches Windows so every account can be on at once, warns you when an update undoes it, makes new alt accounts and opens each one with no password box. Desktop shortcuts per account with no sound, no drives, no wallpaper, 1366x768 or 1800x768, and the account's name on its window. Tells you how many your PC can run. |
 | **Upload cap and timer** | Limits how fast Roblox uploads on a slow connection, and turns the PC off at a time you pick. |
 
 ## Is it safe?
@@ -73,6 +75,7 @@ macros ask for themselves. Leave Ultra Low off on an account a macro runs, since
 | Works on Roblox in every RDP login | Yes | Yes | Yes |
 | Trims Roblox's RAM | Yes | Yes | Yes |
 | CPU priority, cores and limits | Yes | | Yes |
+| Live previews of every RDP | Yes | | |
 | Restarts a client into the same server | Yes | | |
 | Discord status reports | Yes | | |
 | Free and open source | Yes | Yes | Free tier |

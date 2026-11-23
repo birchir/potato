@@ -106,6 +106,14 @@ pub fn logical_cores() -> usize {
     16
 }
 
+pub fn physical_cores() -> usize {
+    8
+}
+
+pub fn base_mhz() -> u32 {
+    3600
+}
+
 pub fn set_cpu(_: u32, _: &Cpu) -> bool {
     true
 }

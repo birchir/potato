@@ -272,6 +272,33 @@ pub fn logical_cores() -> usize {
     unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) as usize }
 }
 
+/// The CPU's physical cores (the guide counts RDPs from these and the logical processors).
+pub fn physical_cores() -> usize {
+    use windows::Win32::System::SystemInformation::{GetLogicalProcessorInformation, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION};
+    let mut len = 0u32;
+    unsafe {
+        let _ = GetLogicalProcessorInformation(None, &mut len);
+        let mut buf = vec![SYSTEM_LOGICAL_PROCESSOR_INFORMATION::default(); len as usize / size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>() + 1];
+        if GetLogicalProcessorInformation(Some(buf.as_mut_ptr()), &mut len).is_err() {
+            return logical_cores();
+        }
+        buf.truncate(len as usize / size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>());
+        buf.iter().filter(|i| i.Relationship == RelationProcessorCore).count().max(1)
+    }
+}
+
+/// The CPU's rated speed in MHz, as Windows lists it (the guide's "Base Speed"), or 0 if it can't be read.
+pub fn base_mhz() -> u32 {
+    use windows::Win32::System::Registry::RRF_RT_REG_DWORD;
+    let mut mhz = 0u32;
+    let mut size = 4u32;
+    let ok = unsafe {
+        RegGetValueW(HKEY_LOCAL_MACHINE, w!("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"), w!("~MHz"), RRF_RT_REG_DWORD, None,
+                     Some((&mut mhz as *mut u32).cast()), Some(&mut size))
+    };
+    if ok.is_ok() { mhz } else { 0 }
+}
+
 /// How one client should use the CPU. Off values put it back to Windows' normal.
 pub struct Cpu {
     pub priority: Priority,

@@ -1,5 +1,6 @@
-//! The window: accounts down the left, the chosen account's settings on the right (like Windows Settings).
-//! All the work happens in engine.rs; closing the window hides it to the tray.
+//! The window: the Overview (live previews of every Roblox and Remote Desktop window), then each account's
+//! settings, Remote Desktop and Performance down the left, like Windows Settings. All the work happens in
+//! engine.rs; closing the window hides it to the tray.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +48,7 @@ fn dur(seconds: f32) -> f32 {
 
 #[derive(Clone, PartialEq)]
 enum Page {
+    Overview,
     Account(String),
     WholePc,
     RemoteDesktop,
@@ -74,6 +76,10 @@ pub struct App {
     /// the window, so the tray can show it again (None off Windows: closing then really closes)
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Option<isize>,
+    /// the live pictures on the Overview, and the windows they show (looked up once a second)
+    thumbs: crate::preview::Thumbs,
+    wins: Vec<crate::preview::Win>,
+    wins_at: Option<Instant>,
     #[cfg(windows)]
     _tray: Option<tray_icon::TrayIcon>,
 }
@@ -84,7 +90,6 @@ impl App {
         style(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         let engine = Engine::start(move || ctx.request_repaint());
-        let first = engine.lock().unwrap().profiles.first().map(|p| p.sid.clone());
         let hwnd = window_handle(cc);
         #[cfg(windows)]
         if let Some(h) = hwnd {
@@ -94,7 +99,7 @@ impl App {
             #[cfg(windows)]
             _tray: hwnd.and_then(|h| crate::tray::create(h, cc.egui_ctx.clone(), engine.clone())),
             engine,
-            page: first.map_or(Page::WholePc, Page::Account),
+            page: Page::Overview,
             confirm_restart: None,
             confirm_debloat: None,
             update_dismissed: false,
@@ -105,6 +110,9 @@ impl App {
             new_pass: String::new(),
             busy: Arc::default(),
             toast: None,
+            thumbs: crate::preview::Thumbs::new(hwnd),
+            wins: Vec::new(),
+            wins_at: None,
             hwnd,
         }
     }
@@ -138,10 +146,12 @@ impl eframe::App for App {
             .show(ui, |ui| self.nav(ui, &e));
         egui::CentralPanel::default().frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(32, 24))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("page").show(ui, |ui| {
-                ui.set_width(ui.available_width().min(860.0));   // rows don't stretch across a wide screen
+                // setting rows don't stretch across a wide screen; the live pictures may
+                ui.set_width(ui.available_width().min(if self.page == Page::Overview { 1500.0 } else { 860.0 }));
                 self.banner(ui, &e);
                 self.header(ui, &mut e);
                 match self.page.clone() {
+                    Page::Overview => self.overview_page(ui, &mut e),
                     Page::Account(sid) => self.account_page(ui, &mut e, &sid),
                     Page::WholePc => self.pc_page(ui, &mut e),
                     Page::RemoteDesktop => self.rdp_page(ui, &mut e),
@@ -155,6 +165,7 @@ impl eframe::App for App {
         if !e.note.is_empty() {
             self.toast = Some((std::mem::take(&mut e.note), ui.ctx().input(|i| i.time)));
         }
+        self.thumbs.end_frame();   // pictures not drawn this frame (another page, scrolled away) go
         self.draw_toast(ui.ctx());
         if e.config != before {
             e.changed();
@@ -182,8 +193,17 @@ impl App {
             ui.label(RichText::new(format!("Roblox {} · Saved {}", gb(roblox), gb(e.freed))).size(12.0).color(FAINT));
         });
         ui.add_space(14.0);
-        ui.label(RichText::new("Accounts").size(12.0).color(FAINT));
         let mut marker = None;
+        let open = e.clients.len();
+        let r = nav_item(ui, "Overview", &if open == 0 { String::new() } else { format!("{open} Live") }, None, self.page == Page::Overview);
+        if self.page == Page::Overview {
+            marker = Some(r.rect);
+        }
+        if r.clicked() {
+            self.page = Page::Overview;
+        }
+        ui.add_space(10.0);
+        ui.label(RichText::new("Accounts").size(12.0).color(FAINT));
         for p in &e.profiles {
             let ram: u64 = e.clients.iter().filter(|c| c.sid == p.sid).map(|c| c.ram).sum();
             let running = e.clients.iter().any(|c| c.sid == p.sid);
@@ -202,7 +222,7 @@ impl App {
         }
         ui.add_space(14.0);
         ui.label(RichText::new("Potato").size(12.0).color(FAINT));
-        let r = nav_item(ui, "Whole PC", "", None, self.page == Page::WholePc);
+        let r = nav_item(ui, "Performance", "", None, self.page == Page::WholePc);
         if self.page == Page::WholePc {
             marker = Some(r.rect);
         }
@@ -347,7 +367,12 @@ impl App {
                 };
                 (name, format!("{running} · {state}"))
             }
-            Page::WholePc => ("Whole PC".to_string(), "Settings for every account".to_string()),
+            Page::Overview => {
+                let rdps = self.wins.iter().filter(|w| matches!(w.kind, crate::preview::Kind::Rdp(_))).count();
+                let n = e.clients.len();
+                ("Overview".to_string(), format!("{n} Roblox {} · {rdps} Remote {} Open", if n == 1 { "Client" } else { "Clients" }, if rdps == 1 { "Desktop" } else { "Desktops" }))
+            }
+            Page::WholePc => ("Performance".to_string(), "Settings for the whole PC, from the RDP optimization guides".to_string()),
             Page::RemoteDesktop => {
                 let r = e.rdp.lock().unwrap();
                 let n = r.accounts.len();
@@ -469,17 +494,24 @@ impl App {
         });
         group(ui, "CPU", |ui| {
             let list: Vec<(u32, String)> = [0, 1, 2, 3, 4, 6, 8].into_iter().filter(|n| *n <= cores).map(|n| (n, off_or(n, &|n| format!("{n} Each")))).collect();
-            row(ui, "Own CPU Cores", &format!("Each client gets its own cores ({cores} on this PC)"), true, |ui, id| { dropdown(ui, "cores", id, &mut c.cores_per_client, &list); });
+            row(ui, "Own CPU Cores", &format!("Each client gets its own cores ({cores} on this PC)"), false, |ui, id| { dropdown(ui, "cores", id, &mut c.cores_per_client, &list); });
+            let list: Vec<(u32, String)> = [0, 2, 3].into_iter().filter(|n| *n < cores).map(|n| (n, off_or(n, &|n| format!("Last {n} Cores")))).collect();
+            row(ui, "Cores For Remote Desktop And Macros", "Remote Desktop windows and AutoHotkey run here, Roblox stays off them", true,
+                |ui, id| { dropdown(ui, "helper-cores", id, &mut c.helper_cores, &list); });
+        });
+        group(ui, "Power", |ui| {
+            switch_row(ui, "High Performance Power Plan", "Windows' High Performance plan: no slowing down to save power. Off goes back to Balanced", false, &mut c.high_performance);
+            switch_row(ui, "Turn Off CPU Boost", "Keeps the CPU at its base speed: less heat and fewer CPU spikes with many clients", false, &mut c.cpu_boost_off);
+            switch_row(ui, "Turn Off Fast Startup", "A real restart every time you turn the PC off, so it starts clean", true, &mut c.fast_startup_off);
+        });
+        group(ui, "Network", |ui| {
+            row(ui, "Upload Cap", "Limits how fast all of Roblox can upload, for slow internet. Empty for no cap", true, |ui, id| {
+                number_box(ui, id, &mut c.upload_kbps, 1_000_000, "kbit/s", "None");
+            });
         });
         group(ui, "Clients", |ui| {
             let list = [0, 1, 2, 4, 6, 12, 24].map(|n| (n, off_or(n, &|n| format!("Every {n} {}", if n == 1 { "Hour" } else { "Hours" }))));
-            row(ui, "Restart Clients", "Closes them and opens each in the same server", true, |ui, id| { dropdown(ui, "restart", id, &mut c.restart_hours, &list); });
-        });
-        group(ui, "Network And Power", |ui| {
-            row(ui, "Upload Cap", "Limits how fast all of Roblox can upload, for slow internet. Empty for no cap", false, |ui, id| {
-                number_box(ui, id, &mut c.upload_kbps, 1_000_000, "kbit/s", "None");
-            });
-            switch_row(ui, "Turn Off CPU Boost", "Keeps the CPU at its base speed: less heat and fewer CPU spikes with many clients", false, &mut c.cpu_boost_off);
+            row(ui, "Restart Clients", "Closes them and opens each in the same server", false, |ui, id| { dropdown(ui, "restart", id, &mut c.restart_hours, &list); });
             row(ui, "Turn PC Off At", "Every day at this time, like 6:30, 0630 or 6pm. Empty for never", true, |ui, id| {
                 let text = self.shutdown_text.get_or_insert_with(|| c.shutdown_at.clone());
                 let r = ui.add(egui::TextEdit::singleline(text).desired_width(84.0).hint_text("Never").align(egui::Align2::CENTER_CENTER)).labelled_by(id);
@@ -616,14 +648,192 @@ fn nav_item(ui: &mut Ui, name: &str, right: &str, dot: Option<Color32>, picked: 
     resp
 }
 
-/// A titled block of setting rows, like a group in Windows Settings.
+/// One live tile: who it is, the window to picture (None: a Remote Desktop that isn't open), and its Roblox.
+struct Tile {
+    name: String,
+    note: &'static str,
+    win: Option<crate::preview::Win>,
+    /// the Windows user whose Roblox it is (for its RAM, CPU and Trim)
+    user: Option<String>,
+    rdp: Option<String>,
+}
+
+impl App {
+    /// Live pictures of every Remote Desktop and Roblox window, with what each one uses (RoAlt-style).
+    fn overview_page(&mut self, ui: &mut Ui, e: &mut Engine) {
+        use crate::preview::Kind;
+        let accounts = e.rdp.lock().unwrap().accounts.clone();
+        if self.wins_at.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+            self.wins = crate::preview::windows(&accounts);
+            self.wins_at = Some(Instant::now());
+        }
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        // the numbers at a glance
+        let (used, total) = e.memory;
+        let roblox: u64 = e.clients.iter().map(|c| c.ram).sum();
+        let cpu: f32 = e.cpu_pct.values().sum::<f32>().clamp(0.0, 100.0) + 0.0;   // + 0.0 turns -0 into 0
+        ui.add_space(8.0);
+        ui.columns(4, |cols| {
+            stat(&mut cols[0], "RAM In Use", &gb(used), &format!("of {}", gb(total)), Some(if total > 0 { used as f32 / total as f32 } else { 0.0 }));
+            stat(&mut cols[1], "Roblox RAM", &gb(roblox), &format!("{} {}", e.clients.len(), if e.clients.len() == 1 { "client" } else { "clients" }), None);
+            stat(&mut cols[2], "Roblox CPU", &format!("{cpu:.0}%"), &format!("{} cores", e.cores), Some(cpu / 100.0));
+            stat(&mut cols[3], "Saved By Potato", &gb(e.freed), "Trimmed since it started", None);
+        });
+        // a tile per Remote Desktop account (open or not), then each Roblox window on this desktop
+        let mut tiles: Vec<Tile> = accounts.iter().map(|n| Tile {
+            name: n.clone(), note: "Remote Desktop",
+            win: self.wins.iter().find(|w| w.kind == Kind::Rdp(n.clone())).cloned(),
+            user: Some(n.clone()), rdp: Some(n.clone()),
+        }).collect();
+        for w in self.wins.iter().filter(|w| w.kind == Kind::Roblox) {
+            let user = e.clients.iter().find(|c| c.pid == w.pid).map(|c| c.user.clone());
+            tiles.push(Tile { name: user.clone().unwrap_or("Roblox".into()), note: "Roblox On This PC", win: Some(w.clone()), user, rdp: None });
+        }
+        ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            ui.label(semi("Live", 14.0).color(TEXT));
+            ui.label(RichText::new("Click a picture to bring that window to the front").size(12.5).color(FAINT));
+        });
+        ui.add_space(6.0);
+        if tiles.is_empty() {
+            Frame::new().fill(CARD).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(28)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.vertical_centered(|ui| {
+                    ui.label(semi("Nothing Open Yet", 16.0).color(TEXT));
+                    ui.label(RichText::new("Open Roblox, or make a Remote Desktop account on the Remote Desktop page, and it shows up here live.").color(FAINT));
+                });
+            });
+            return;
+        }
+        let cols = (ui.available_width() / 330.0).clamp(2.0, 4.0) as usize;
+        let gap = 14.0;
+        let w = (ui.available_width() - gap * (cols - 1) as f32) / cols as f32;
+        let mut act: Option<(&'static str, String)> = None;
+        for row in tiles.chunks(cols) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for t in row {
+                    if let Some(a) = self.tile(ui, e, t, w) {
+                        act = Some(a);
+                    }
+                }
+            });
+            ui.add_space(gap);
+        }
+        match act {
+            Some(("open", n)) => {
+                if let Err(m) = crate::rdp::open(&n, e.config.rdp_wide.contains(&n)) {
+                    e.note = m;
+                }
+            }
+            Some(("trim", user)) => self.run_action("trim", ui.ctx(), move |e| e.trim_user(&user)),
+            _ => {}
+        }
+    }
+
+    /// One live tile. Returns what was clicked: ("open", account) or ("trim", user).
+    fn tile(&mut self, ui: &mut Ui, e: &Engine, t: &Tile, w: f32) -> Option<(&'static str, String)> {
+        let mut act = None;
+        let pids: Vec<u32> = t.user.as_ref().map(|u| e.clients.iter().filter(|c| c.user.eq_ignore_ascii_case(u)).map(|c| c.pid).collect()).unwrap_or_default();
+        let ram: u64 = e.clients.iter().filter(|c| pids.contains(&c.pid)).map(|c| c.ram).sum();
+        let cpu: f32 = pids.iter().filter_map(|p| e.cpu_pct.get(p)).sum::<f32>().max(0.0) + 0.0;
+        Frame::new().fill(CARD).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(8)).show(ui, |ui| ui.vertical(|ui| {
+            ui.set_width(w - 16.0);
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w - 16.0, (w - 16.0) * 9.0 / 16.0), Sense::click());
+            let p = ui.painter();
+            p.rect_filled(rect, 6.0, Color32::from_rgb(6, 6, 6));
+            match &t.win {
+                Some(win) if !win.minimized => {
+                    let ppp = ui.ctx().pixels_per_point();
+                    let px = |r: egui::Rect| [(r.left() * ppp) as i32, (r.top() * ppp) as i32, (r.right() * ppp) as i32, (r.bottom() * ppp) as i32];
+                    if !self.thumbs.show(win.hwnd, px(rect.shrink(1.0)), px(ui.clip_rect())) {
+                        centered_note(ui, rect, "Live Preview", "Shows here on Windows");
+                    }
+                }
+                Some(_) => centered_note(ui, rect, "Minimized", "Click to show it. Minimized Remote Desktops stop drawing"),
+                None => centered_note(ui, rect, "Not Open", "Open it to see it live"),
+            }
+            if let Some(win) = &t.win && resp.clicked() {
+                crate::preview::focus(win.hwnd);
+            }
+            if t.win.is_some() {
+                let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), dur(0.12));
+                ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.5, LINE.lerp_to_gamma(TEXT, hover * 0.6)), egui::StrokeKind::Inside);
+                resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let live = t.win.is_some();
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 3.5, if live { GOOD } else { OFF });
+                ui.vertical(|ui| {
+                    ui.set_max_width(w - 110.0);   // room for the button, never under it
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.add(egui::Label::new(semi(&t.name, 14.0).color(TEXT)).truncate());
+                    let use_ = if pids.is_empty() { "No Roblox".to_string() } else { format!("{} · {cpu:.0}% CPU", gb(ram)) };
+                    ui.add(egui::Label::new(RichText::new(format!("{} · {use_}", t.note)).size(12.0).color(FAINT)).truncate());
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(n) = &t.rdp && t.win.is_none() {
+                        if ui.button("Open").clicked() {
+                            act = Some(("open", n.clone()));
+                        }
+                    } else if let Some(u) = &t.user && !pids.is_empty() && ui.button("Trim").on_hover_text("Frees the RAM this Roblox isn't using").clicked() {
+                        act = Some(("trim", u.clone()));
+                    }
+                });
+            });
+        }));
+        act
+    }
+}
+
+/// A big number with its label, like the stat tiles on battlebot.dev; `share` adds a thin bar under it.
+fn stat(ui: &mut Ui, label: &str, value: &str, note: &str, share: Option<f32>) {
+    Frame::new().fill(CARD).corner_radius(CornerRadius::same(10)).inner_margin(Margin::symmetric(16, 14)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.set_min_height(84.0);   // every tile one height, bar or not
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(RichText::new(label).size(12.0).color(FAINT));
+        ui.label(semi(value, 24.0).color(TEXT));
+        ui.label(RichText::new(note).size(12.0).color(FAINT));
+        if let Some(share) = share {
+            ui.add_space(6.0);
+            ui.add(egui::ProgressBar::new(share.clamp(0.0, 1.0)).desired_height(4.0).fill(if share > 0.85 { BAD } else { TEXT }));
+        }
+    });
+}
+
+/// Two lines of text in the middle of an empty preview.
+fn centered_note(ui: &Ui, rect: egui::Rect, title: &str, note: &str) {
+    let p = ui.painter();
+    p.text(rect.center() - egui::vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, title, egui::FontId::new(14.0, FontFamily::Name("semi".into())), DIM);
+    p.text(rect.center() + egui::vec2(0.0, 11.0), egui::Align2::CENTER_CENTER, note, egui::FontId::proportional(12.0), FAINT);
+}
+
 impl App {
     /// Remote Desktop alts: let them all on at once, make accounts the way Computer Management does, open them.
     fn rdp_page(&mut self, ui: &mut Ui, e: &mut Engine) {
         let r = e.rdp.lock().unwrap().clone();
         let busy = r.busy;
         let (mut patch, mut undo, mut add, mut open) = (false, false, false, None);
-        let mut startup = None;
+        let (mut startup, mut shortcut, mut wide) = (None, None, None);
+        let ram_gb = (e.memory.1 as f64 / (1u64 << 30) as f64 * 10.0).round() / 10.0;   // what Task Manager shows: 7.99 is "8.0 GB"
+        let (by_cpu, by_ram) = crate::rdp::capacity(e.physical_cores, e.cores, ram_gb);
+        group(ui, "This PC", |ui| {
+            let n = by_cpu.min(by_ram);
+            let limit = if by_cpu < by_ram { "CPU" } else { "RAM" };
+            row(ui, "How Many It Can Run", &format!("The guide's test: {by_cpu} by CPU, {by_ram} by RAM. {limit} is the limit"), false, |ui, _| {
+                ui.label(semi(&format!("About {n}"), 18.0).color(if n == 0 { BAD } else { TEXT }));
+            });
+            let ghz = e.base_mhz as f32 / 1000.0;
+            let note = if e.base_mhz == 0 { "Couldn't read it".to_string() } else if ghz >= 2.5 { "Over 2.5 GHz: one Remote Desktop per 2-3 logical processors".into() } else { "Under 2.5 GHz: Remote Desktops will be slow, expect fewer".into() };
+            row(ui, "CPU Speed", &note, true, |ui, _| {
+                if e.base_mhz > 0 {
+                    ui.label(semi(&format!("{ghz:.1} GHz"), 14.0).color(if ghz >= 2.5 { TEXT } else { BAD }));
+                }
+            });
+        });
         group(ui, "All On At Once", |ui| {
             let (note, can) = match r.patch {
                 Patch::Patched => ("On. Potato warns you if a Windows update undoes it", false),
@@ -646,9 +856,18 @@ impl App {
         });
         group(ui, "Accounts", |ui| {
             for name in &r.accounts {
-                row(ui, name, &format!("Opens on {}", crate::rdp::address(name)), false, |ui, id| {
+                let is_wide = e.config.rdp_wide.contains(name);
+                let size = if is_wide { "1800x768" } else { "1366x768" };
+                stack_row(ui, name, &format!("{} · {size}, no sound, no drives, no wallpaper", crate::rdp::address(name)), |ui, id| {
                     if ui.button("Open").labelled_by(id).clicked() {
                         open = Some(name.clone());
+                    }
+                    if ui.button("Desktop Shortcut").on_hover_text("Puts a shortcut on your desktop that opens this account with all these settings, even without Potato").clicked() {
+                        shortcut = Some(name.clone());
+                    }
+                    let mut w = is_wide;
+                    if dropdown(ui, &format!("size-{name}"), id, &mut w, &[(false, "1366x768".to_string()), (true, "1800x768 (Boosting)".to_string())]) {
+                        wide = Some((name.clone(), w));
                     }
                     let mut on = e.config.rdp_startup.contains(name);
                     if ui.checkbox(&mut on, "Open At Sign In").on_hover_text("Opens this account when you sign in to Windows").changed() {
@@ -697,7 +916,20 @@ impl App {
                 e.note = "Couldn't Set Up Opening At Sign In".into();
             }
         }
-        if let Some(name) = open && let Err(m) = crate::rdp::open(&name) {
+        if let Some((name, w)) = wide {
+            e.config.rdp_wide.retain(|n| *n != name);
+            if w {
+                e.config.rdp_wide.push(name.clone());
+            }
+            let _ = crate::rdp::write_file(&name, w);   // a desktop shortcut opens the file: keep it in step
+        }
+        if let Some(name) = shortcut {
+            e.note = match crate::rdp::desktop_shortcut(&name, e.config.rdp_wide.contains(&name)) {
+                Ok(()) => format!("Put {name} On Your Desktop"),
+                Err(m) => m,
+            };
+        }
+        if let Some(name) = open && let Err(m) = crate::rdp::open(&name, e.config.rdp_wide.contains(&name)) {
             e.note = m;
         }
     }
@@ -735,6 +967,20 @@ fn row(ui: &mut Ui, label: &str, note: &str, last: bool, control: impl FnOnce(&m
         let rect = r.response.rect;
         ui.painter().hline(rect.x_range().shrink(18.0), rect.bottom(), Stroke::new(1.0, LINE));
     }
+}
+
+/// A row with more controls than fit beside its text: label and note on top, the controls in a line under them.
+fn stack_row(ui: &mut Ui, label: &str, note: &str, controls: impl FnOnce(&mut Ui, egui::Id)) {
+    let r = Frame::new().inner_margin(Margin::symmetric(18, 12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 3.0;
+        let id = ui.label(RichText::new(label).size(14.0).color(TEXT)).id;
+        ui.label(RichText::new(note).size(12.5).color(FAINT));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| controls(ui, id));
+    });
+    let rect = r.response.rect;
+    ui.painter().hline(rect.x_range().shrink(18.0), rect.bottom(), Stroke::new(1.0, LINE));
 }
 
 /// A setting with an on/off switch where the whole row is the button (Fitts's law: a big target). Returns
@@ -871,6 +1117,8 @@ fn style(ctx: &egui::Context) {
     ctx.set_missing_glyph_policy(egui::epaint::text::MissingGlyphPolicy::Tofu);
     ctx.set_fonts(fonts);
 
+    // always dark: egui otherwise follows Windows' light mode for its own buttons, boxes and checkboxes
+    ctx.set_theme(egui::Theme::Dark);
     let mut v = egui::Visuals::dark();
     // egui's dark-theme edge shading fattens dark text on the white buttons and toasts, and hinting snaps letters
     // to whole pixels, which looks jagged at 100% scaling: a middle gamma and no hinting keep every text smooth

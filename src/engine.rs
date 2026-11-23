@@ -22,6 +22,9 @@ const UPDATE_EVERY: Duration = Duration::from_secs(10 * 60);   // GitHub allows 
 const RELEASES: &str = "https://api.github.com/repos/birchir/potato/releases/latest";
 
 /// Potato's settings file, readable by every Windows user (the helpers read it from their own sessions).
+/// What the guide puts on its own cores, apart from Roblox: Remote Desktop windows and AutoHotkey (every build of it).
+const HELPER_EXES: [&str; 7] = ["mstsc.exe", "AutoHotkey.exe", "AutoHotkey64.exe", "AutoHotkey32.exe", "AutoHotkeyU64.exe", "AutoHotkeyU32.exe", "AutoHotkeyA32.exe"];
+
 pub fn config_path() -> PathBuf {
     let base = std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Potato").join("settings.json")
@@ -63,6 +66,9 @@ pub struct Engine {
     pub memory: (u64, u64),
     pub freed: u64,
     pub cores: usize,
+    /// physical cores and rated speed (MHz), for the guide's how-many-RDPs test
+    pub physical_cores: usize,
+    pub base_mhz: u32,
     pub update: Update,
     /// the Remote Desktop page's state, looked up on its own thread
     pub rdp: Arc<Mutex<crate::rdp::Rdp>>,
@@ -73,6 +79,8 @@ pub struct Engine {
     pub restarts: HashMap<String, u32>,
     /// what each client's CPU settings were last set to, so they're only set again when something changes
     cpu_set: HashMap<u32, (Priority, Option<u64>, bool)>,
+    /// cores set on each Remote Desktop window and macro (None: every core)
+    helper_set: HashMap<u32, Option<u64>>,
     cpu_seen: HashMap<u32, (u64, Instant)>,
     /// each capped client's job and the cap it has
     jobs: HashMap<u32, (u32, isize)>,
@@ -86,6 +94,8 @@ pub struct Engine {
     crashed: Vec<(String, rejoin::Server, Instant)>,
     upload_applied: Option<u32>,
     boost_applied: Option<bool>,
+    /// (High Performance plan, Fast Startup off) as last set
+    power_applied: Option<(bool, bool)>,
     shutdown_done: Option<u32>,
     /// the clock hour (0-23) the last scheduled report went out in, so each hour sends exactly one
     reported_hour: u32,
@@ -126,12 +136,15 @@ impl Engine {
             memory: (0, 0),
             freed: 0,
             cores: system::logical_cores(),
+            physical_cores: system::physical_cores(),
+            base_mhz: system::base_mhz(),
             update: Update::default(),
             rdp: Default::default(),
             note: String::new(),
             cpu_pct: HashMap::new(),
             restarts: HashMap::new(),
             cpu_set: HashMap::new(),
+            helper_set: HashMap::new(),
             cpu_seen: HashMap::new(),
             jobs: HashMap::new(),
             closed_by_us: HashSet::new(),
@@ -140,6 +153,7 @@ impl Engine {
             crashed: Vec::new(),
             upload_applied: None,
             boost_applied: None,
+            power_applied: None,
             shutdown_done: None,
             reported_hour: system::local_minutes() / 60,   // the first report waits for the next full hour
             history: Vec::new(),
@@ -252,6 +266,9 @@ impl Engine {
         self.apply_cpu();
         self.keep_maximized();
         self.apply_upload_cap();
+        let accounts = self.rdp.lock().unwrap().accounts.clone();
+        crate::preview::name_rdp_windows(&accounts);
+        self.apply_power();
         self.apply_cpu_boost();
         self.shutdown_on_time();
         self.report();
@@ -287,7 +304,12 @@ impl Engine {
     fn apply_cpu(&mut self) {
         let mut list: Vec<&Client> = self.clients.iter().collect();
         list.sort_by_key(|c| (c.started, c.pid));
-        let masks = (self.config.cores_per_client > 0).then(|| core_masks(list.len(), self.cores, self.config.cores_per_client as usize));
+        let (roblox_cores, helper_mask) = crate::tweaks::split_cores(self.cores, self.config.helper_cores as usize);
+        let masks = if self.config.cores_per_client > 0 {
+            Some(core_masks(list.len(), roblox_cores, self.config.cores_per_client as usize))
+        } else {
+            (helper_mask != 0).then(|| vec![crate::tweaks::first_cores(roblox_cores); list.len()])
+        };
         let untouched = (Priority::Normal, None, false);
         for (i, c) in list.iter().enumerate() {
             let a = self.config.account(&c.sid);
@@ -299,6 +321,16 @@ impl Engine {
         }
         let pids: HashSet<u32> = self.clients.iter().map(|c| c.pid).collect();
         self.cpu_set.retain(|pid, _| pids.contains(pid));
+        // Remote Desktop windows and AutoHotkey macros on the cores Roblox doesn't use (the guide's core affinity)
+        let helpers: Vec<u32> = HELPER_EXES.iter().flat_map(|exe| system::pids_named(exe)).collect();
+        for &pid in &helpers {
+            let want = (helper_mask != 0).then_some(helper_mask);
+            if self.helper_set.get(&pid).copied().unwrap_or(None) != want
+                && system::set_cpu(pid, &Cpu { priority: Priority::Normal, cores: want, efficiency: false }) {
+                self.helper_set.insert(pid, want);
+            }
+        }
+        self.helper_set.retain(|pid, _| helpers.contains(pid));
         // hard CPU caps: a job per capped client or Remote Desktop window; a lifted cap goes back to 100%
         let mut caps: Vec<(u32, u32)> = self.clients.iter().map(|c| {
             let a = self.config.account(&c.sid);
@@ -423,11 +455,44 @@ impl Engine {
         }
         // shortcut: "on" writes 2 (Aggressive, Windows' default) instead of the plan's old value; read it first if anyone had a custom one
         let mode = if want { "0" } else { "2" };
+        if want {   // the guide's "Attributes = 2": shows Processor performance boost mode in Power Options
+            system::run("powercfg", &["-attributes", "SUB_PROCESSOR", "PERFBOOSTMODE", "-ATTRIB_HIDE"]);
+        }
         let ok = ["/setacvalueindex", "/setdcvalueindex"].iter()
             .all(|set| system::run("powercfg", &[set, "SCHEME_CURRENT", "SUB_PROCESSOR", "PERFBOOSTMODE", mode]))
             && system::run("powercfg", &["/setactive", "SCHEME_CURRENT"]);
         if !ok {
             self.note = "Couldn't Change CPU Boost".into();
+        }
+    }
+
+    /// The guide's power settings, set only when a switch changes (and never on a PC whose owner didn't turn one on).
+    fn apply_power(&mut self) {
+        let want = (self.config.high_performance, self.config.fast_startup_off);
+        let had = self.power_applied.replace(want).unwrap_or((false, false));
+        if had == want {
+            return;
+        }
+        if want.0 != had.0 {
+            // shortcut: off goes back to Balanced, not whatever plan was on before; remember the old plan if people use custom ones
+            const PLAN: &str = r#"
+$g = $env:POTATO_PLAN
+powercfg /setactive $g 2>$null
+if ($LASTEXITCODE -ne 0) {
+    # laptops and Modern Standby PCs hide High Performance: copy Windows' built-in one
+    $o = powercfg -duplicatescheme $g
+    if ("$o" -match '[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}') { powercfg /setactive $Matches[0] } else { exit 1 }
+}
+"#;
+            let plan = if want.0 { "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" } else { "381b4222-f694-41f0-9685-ff5bb260df2e" };
+            if system::powershell(PLAN, &[("POTATO_PLAN", plan)]).is_err() {
+                self.note = "Couldn't Change The Power Plan".into();
+            }
+            self.boost_applied = None;   // CPU boost is a setting of the plan: put it on the new one too
+        }
+        if want.1 != had.1 && !system::run("reg", &["add", r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power", "/v", "HiberbootEnabled",
+                                                     "/t", "REG_DWORD", "/d", if want.1 { "0" } else { "1" }, "/f"]) {
+            self.note = "Couldn't Change Fast Startup".into();
         }
     }
 
@@ -556,12 +621,23 @@ impl Engine {
 
     fn trim_clients(&mut self) -> (usize, u64) {
         self.last_trim = Instant::now();
+        let (n, freed) = self.trim_where(|_| true);
+        self.last_trim_freed = Some(freed);
+        (n, freed)
+    }
+
+    /// Trim the clients running as one Windows user (a tile on the Overview).
+    pub fn trim_user(&mut self, user: &str) {
+        let (_, freed) = self.trim_where(|c| c.user.eq_ignore_ascii_case(user));
+        self.tell(true, freed.max(1), format!("Trimmed {user}, Freed {}", gb(freed)));
+    }
+
+    fn trim_where(&mut self, pick: impl Fn(&Client) -> bool) -> (usize, u64) {
         let before: u64 = self.clients.iter().map(|c| c.ram).sum();
-        let n = self.clients.iter().filter(|c| system::trim(c.pid)).count();
+        let n = self.clients.iter().filter(|c| pick(c) && system::trim(c.pid)).count();
         self.clients = system::clients();
         let freed = before.saturating_sub(self.clients.iter().map(|c| c.ram).sum());
         self.freed += freed;
-        self.last_trim_freed = Some(freed);
         (n, freed)
     }
 
