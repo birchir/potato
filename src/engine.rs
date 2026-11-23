@@ -27,6 +27,11 @@ pub fn config_path() -> PathBuf {
     base.join("Potato").join("settings.json")
 }
 
+/// Potato's own copy next to its settings, which the logon tasks run (helper.rs install keeps it current).
+pub fn installed_exe() -> PathBuf {
+    config_path().with_file_name("Potato.exe")
+}
+
 /// Where an account's settings stand.
 #[derive(Clone, Copy, PartialEq)]
 pub enum State {
@@ -97,7 +102,9 @@ pub struct Engine {
     /// the Windows notification about an undone Remote Desktop patch went out (once per undo)
     rdp_warned: bool,
     last_tick: Option<Instant>,
-    last_trim: Instant,
+    pub last_trim: Instant,
+    /// what the latest trim freed (None until one runs)
+    pub last_trim_freed: Option<u64>,
     last_clean: Instant,
     last_restart: Instant,
 }
@@ -146,6 +153,7 @@ impl Engine {
             rdp_warned: false,
             last_tick: None,
             last_trim: Instant::now(),
+            last_trim_freed: None,
             last_clean: Instant::now(),
             last_restart: Instant::now(),
         }
@@ -553,6 +561,7 @@ impl Engine {
         self.clients = system::clients();
         let freed = before.saturating_sub(self.clients.iter().map(|c| c.ram).sum());
         self.freed += freed;
+        self.last_trim_freed = Some(freed);
         (n, freed)
     }
 

@@ -193,6 +193,34 @@ pub fn open(name: &str) -> Result<(), String> {
     std::process::Command::new("mstsc").arg(&file).spawn().map(|_| ()).map_err(|_| "Couldn't Open Remote Desktop".into())
 }
 
+const STARTUP_TASK: &str = "Potato Open Remote Desktops";
+
+/// The logon task that opens the picked accounts (`Potato.exe --open-rdp`) when this Windows user signs in, or
+/// None when no account is picked. Runs elevated (no prompt for an admin) so it can rewrite the .rdp files.
+pub fn startup_task(sid: &str, exe: &Path, any: bool) -> Option<String> {
+    any.then(|| format!(r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{sid}</UserId><Delay>PT15S</Delay></LogonTrigger></Triggers>
+  <Principals><Principal id="Me"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT10M</ExecutionTimeLimit></Settings>
+  <Actions Context="Me"><Exec><Command>{}</Command><Arguments>--open-rdp</Arguments></Exec></Actions>
+</Task>"#, exe.display()))
+}
+
+/// Keep the logon task in step with the picked accounts.
+pub fn save_startup(any: bool) -> bool {
+    system::set_task(STARTUP_TASK, startup_task(&system::current_sid(), &crate::engine::installed_exe(), any).as_deref())
+}
+
+/// `Potato.exe --open-rdp`, at sign in: open each picked account, a few seconds apart so mstsc isn't swamped.
+pub fn open_startup() {
+    let config = std::fs::read_to_string(crate::engine::config_path()).map(|t| crate::config::Config::from_json(&t)).unwrap_or_default();
+    for name in &config.rdp_startup {
+        let _ = open(name);
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+}
+
 /// Standard base64 (for PowerShell's -EncodedCommand).
 pub fn base64(bytes: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -222,6 +250,14 @@ mod tests {
         assert_eq!(patch_state(&p), Patch::Patched);
         assert_eq!(patch_state(&[0u8; 40]), Patch::Unsupported);
         assert!(patched(&dll[..20]).is_none(), "a check cut off by the end of the file isn't patched");
+    }
+
+    #[test]
+    fn startup_task_only_when_picked() {
+        assert_eq!(startup_task("S-1", Path::new("C:\\P\\Potato.exe"), false), None);
+        let xml = startup_task("S-1-5-21-9", Path::new("C:\\P\\Potato.exe"), true).unwrap();
+        assert!(xml.contains("<UserId>S-1-5-21-9</UserId><Delay>"));
+        assert!(xml.contains("<Command>C:\\P\\Potato.exe</Command><Arguments>--open-rdp</Arguments>"));
     }
 
     #[test]

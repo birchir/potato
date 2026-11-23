@@ -448,11 +448,15 @@ impl App {
 
     fn pc_page(&mut self, ui: &mut Ui, e: &mut Engine) {
         let cores = e.cores as u32;
+        let trim_note = match e.last_trim_freed {
+            Some(f) => format!("Last trim {} min ago, freed {}. Roblox takes some back as it plays", e.last_trim.elapsed().as_secs() / 60, crate::engine::gb(f)),
+            None => "Moves memory Roblox isn't using to the page file".into(),
+        };
         let off_or = |n: u32, f: &dyn Fn(u32) -> String| if n == 0 { "Off".to_string() } else { f(n) };
         let c = &mut e.config;
         group(ui, "Memory", |ui| {
             let list = [0, 1, 2, 5, 10, 15, 30].map(|n| (n, off_or(n, &|n| format!("Every {n} Min"))));
-            row(ui, "Trim Roblox RAM", "Moves memory Roblox isn't using to the page file", false, |ui, id| { dropdown(ui, "trim", id, &mut c.trim_minutes, &list); });
+            row(ui, "Trim Roblox RAM", &trim_note, false, |ui, id| { dropdown(ui, "trim", id, &mut c.trim_minutes, &list); });
             row(ui, "Clean Memory", "Empties Windows' standby memory when RAM use goes over this. Empty for never", false, |ui, id| {
                 ui.label(RichText::new("%").color(FAINT));
                 let mut text = if c.clean_above == 0 { String::new() } else { c.clean_above.to_string() };
@@ -619,6 +623,7 @@ impl App {
         let r = e.rdp.lock().unwrap().clone();
         let busy = r.busy;
         let (mut patch, mut undo, mut add, mut open) = (false, false, false, None);
+        let mut startup = None;
         group(ui, "All On At Once", |ui| {
             let (note, can) = match r.patch {
                 Patch::Patched => ("On. Potato warns you if a Windows update undoes it", false),
@@ -644,6 +649,10 @@ impl App {
                 row(ui, name, &format!("Opens on {}", crate::rdp::address(name)), false, |ui, id| {
                     if ui.button("Open").labelled_by(id).clicked() {
                         open = Some(name.clone());
+                    }
+                    let mut on = e.config.rdp_startup.contains(name);
+                    if ui.checkbox(&mut on, "Open At Sign In").on_hover_text("Opens this account when you sign in to Windows").changed() {
+                        startup = Some((name.clone(), on));
                     }
                 });
             }
@@ -678,6 +687,15 @@ impl App {
             let (name, pass) = (self.new_name.trim().to_string(), std::mem::take(&mut self.new_pass));
             self.new_name.clear();
             engine::refresh_rdp(e.rdp.clone(), Some("add"), move || crate::rdp::add_account(&name, &pass));
+        }
+        if let Some((name, on)) = startup {
+            e.config.rdp_startup.retain(|n| *n != name);
+            if on {
+                e.config.rdp_startup.push(name);
+            }
+            if !crate::rdp::save_startup(!e.config.rdp_startup.is_empty()) {
+                e.note = "Couldn't Set Up Opening At Sign In".into();
+            }
         }
         if let Some(name) = open && let Err(m) = crate::rdp::open(&name) {
             e.note = m;

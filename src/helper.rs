@@ -3,9 +3,7 @@
 //! included. A scheduled task starts that copy whenever any user logs on.
 
 use std::collections::{HashMap, HashSet};
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM};
@@ -20,7 +18,6 @@ use windows::core::{BOOL, PWSTR, w};
 const TASK: &str = "Potato Helper";
 /// a new Roblox window is kept maximized this long (Roblox resizes itself while it loads), then left alone
 const SETTLE: Duration = Duration::from_secs(30);
-const NO_WINDOW: u32 = 0x0800_0000;
 
 /// Remembers when each Roblox window was first seen.
 #[derive(Default)]
@@ -278,16 +275,11 @@ pub fn running_here() -> bool {
     })
 }
 
-/// Where the helper copy lives: a folder every Windows user can read.
-fn helper_exe() -> PathBuf {
-    crate::engine::config_path().with_file_name("Potato.exe")
-}
-
 /// Copy Potato next to its settings and register the logon task, then start it in every session that's
 /// already logged on. Returns false if Windows refused (needs admin).
 pub fn install() -> bool {
     let Ok(me) = std::env::current_exe() else { return false };
-    let exe = helper_exe();
+    let exe = crate::engine::installed_exe();
     if std::fs::read(&me).ok() != std::fs::read(&exe).ok() {
         let _ = std::fs::create_dir_all(exe.parent().unwrap());
         let _ = std::fs::rename(&exe, exe.with_extension("old"));   // a running helper's exe can be renamed, not overwritten
@@ -305,21 +297,10 @@ pub fn install() -> bool {
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Hidden>true</Hidden></Settings>
   <Actions Context="Users"><Exec><Command>{}</Command><Arguments>--helper</Arguments></Exec></Actions>
 </Task>"#, exe.display());
-    let file = exe.with_file_name("helper-task.xml");
-    let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain(xml.encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
-    if std::fs::write(&file, utf16).is_err() {
-        return false;
-    }
-    let ok = schtasks(&["/Create", "/TN", TASK, "/XML", &file.to_string_lossy(), "/F"]);
-    let _ = std::fs::remove_file(&file);
-    ok && schtasks(&["/Run", "/TN", TASK])
+    crate::system::set_task(TASK, Some(&xml)) && crate::system::run("schtasks", &["/Run", "/TN", TASK])
 }
 
 /// Remove the logon task. Running helpers stay idle until their user logs off.
 pub fn uninstall() {
-    schtasks(&["/Delete", "/TN", TASK, "/F"]);
-}
-
-fn schtasks(args: &[&str]) -> bool {
-    Command::new("schtasks").args(args).creation_flags(NO_WINDOW).status().is_ok_and(|s| s.success())
+    crate::system::set_task(TASK, None);
 }

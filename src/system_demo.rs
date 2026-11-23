@@ -85,6 +85,10 @@ pub fn console_session() -> u32 {
     1
 }
 
+pub fn set_task(_: &str, _: Option<&str>) -> bool {
+    true
+}
+
 pub fn current_sid() -> String {
     "S-1-5-21-0".into()
 }

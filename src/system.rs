@@ -225,6 +225,17 @@ pub fn local_minutes() -> u32 {
     t.wHour as u32 * 60 + t.wMinute as u32
 }
 
+/// Register a Task Scheduler task from its XML (Some), or remove it (None). True if it worked.
+pub fn set_task(name: &str, xml: Option<&str>) -> bool {
+    let Some(xml) = xml else { return run("schtasks", &["/Delete", "/TN", name, "/F"]) };
+    let file = std::env::temp_dir().join(format!("{name}.xml"));
+    // schtasks reads the file as UTF-16 with a byte-order mark
+    let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain(xml.encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
+    let ok = std::fs::write(&file, utf16).is_ok() && run("schtasks", &["/Create", "/TN", name, "/XML", &file.to_string_lossy(), "/F"]);
+    let _ = std::fs::remove_file(&file);
+    ok
+}
+
 /// Run a Windows command without a console window; true if it worked.
 pub fn run(program: &str, args: &[&str]) -> bool {
     use std::os::windows::process::CommandExt;
@@ -351,34 +362,43 @@ pub fn clean_standby() -> bool {
 
 /// A Windows notification from Potato's tray icon, like Mem Reduct's (Windows shows tray balloons as toasts).
 pub fn notify(text: &str) {
-    use windows::Win32::UI::Shell::{NIF_INFO, NIIF_LARGE_ICON, NIIF_USER, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW};
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId};
-    unsafe {
-        // the tray-icon crate's hidden window for our icon; shortcut: assumes Potato's one tray icon has id 1
-        let mut hwnd = FindWindowExW(None, None, w!("tray_icon_app"), PCWSTR::null());
-        while let Ok(h) = hwnd {
-            let mut pid = 0;
-            GetWindowThreadProcessId(h, Some(&mut pid));
-            if pid == std::process::id() {
-                break;
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::core::HSTRING;
+    // A real toast (tray balloons are held back while the PC is idle or a window fills the screen). An unpackaged app
+    // needs its name registered under AppUserModelId first; Windows shows that name and icon on the toast.
+    register_toast_name();
+    let esc = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let xml = format!("<toast><visual><binding template=\"ToastGeneric\"><text>{esc}</text></binding></visual></toast>");
+    let show = || -> windows::core::Result<()> {
+        let doc = XmlDocument::new()?;
+        doc.LoadXml(&HSTRING::from(xml))?;
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(TOAST_ID))?.Show(&ToastNotification::CreateToastNotification(&doc)?)
+    };
+    let _ = show();
+}
+
+const TOAST_ID: &str = "Potato";
+
+fn register_toast_name() {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCreateKeyExW, RegSetValueExW};
+    static DONE: std::sync::Once = std::sync::Once::new();
+    DONE.call_once(|| {
+        let icon = crate::engine::config_path().with_file_name("icon.png");
+        let _ = std::fs::write(&icon, include_bytes!("../assets/icon.png"));
+        let mut key = HKEY::default();
+        let sub = std::ffi::OsStr::new(&format!("Software\\Classes\\AppUserModelId\\{TOAST_ID}")).encode_wide_z();
+        unsafe {
+            if RegCreateKeyExW(HKEY_CURRENT_USER, PCWSTR(sub.as_ptr()), None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None).is_ok() {
+                for (name, value) in [("DisplayName", std::ffi::OsString::from("Potato")), ("IconUri", icon.into_os_string())] {
+                    let v = value.encode_wide_z();
+                    let bytes = std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len() * 2);
+                    let _ = RegSetValueExW(key, PCWSTR(std::ffi::OsStr::new(name).encode_wide_z().as_ptr()), None, REG_SZ, Some(bytes));
+                }
+                let _ = RegCloseKey(key);
             }
-            hwnd = FindWindowExW(None, Some(h), w!("tray_icon_app"), PCWSTR::null());
         }
-        let Ok(hwnd) = hwnd else { return };
-        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-        nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_INFO;
-        nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;   // the potato icon, not a stock one
-        for (dst, src) in [(&mut nid.szInfoTitle[..], "Potato"), (&mut nid.szInfo[..], text)] {
-            let room = dst.len() - 1;   // the last one stays 0, ending the text
-            for (d, c) in dst.iter_mut().take(room).zip(src.encode_utf16()) {
-                *d = c;
-            }
-        }
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
-    }
+    });
 }
 
 /// (in use, total) bytes of RAM.
