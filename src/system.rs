@@ -367,9 +367,9 @@ pub fn notify(text: &str) {
     use windows::core::HSTRING;
     // A real toast (tray balloons are held back while the PC is idle or a window fills the screen). An unpackaged app
     // needs its name registered under AppUserModelId first; Windows shows that name and icon on the toast.
-    register_toast_name();
-    let esc = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let xml = format!("<toast><visual><binding template=\"ToastGeneric\"><text>{esc}</text></binding></visual></toast>");
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let icon = esc(&register_toast_name().to_string_lossy());
+    let xml = format!("<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><image placement=\"appLogoOverride\" src=\"file:///{icon}\"/></binding></visual></toast>", esc(text));
     let show = || -> windows::core::Result<()> {
         let doc = XmlDocument::new()?;
         doc.LoadXml(&HSTRING::from(xml))?;
@@ -380,17 +380,18 @@ pub fn notify(text: &str) {
 
 const TOAST_ID: &str = "Potato";
 
-fn register_toast_name() {
+/// Registers once, then returns the icon file the toast shows.
+fn register_toast_name() -> &'static std::path::Path {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCreateKeyExW, RegSetValueExW};
-    static DONE: std::sync::Once = std::sync::Once::new();
-    DONE.call_once(|| {
+    static ICON: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
         let icon = crate::engine::config_path().with_file_name("icon.png");
         let _ = std::fs::write(&icon, include_bytes!("../assets/icon.png"));
         let mut key = HKEY::default();
         let sub = std::ffi::OsStr::new(&format!("Software\\Classes\\AppUserModelId\\{TOAST_ID}")).encode_wide_z();
         unsafe {
             if RegCreateKeyExW(HKEY_CURRENT_USER, PCWSTR(sub.as_ptr()), None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None).is_ok() {
-                for (name, value) in [("DisplayName", std::ffi::OsString::from("Potato")), ("IconUri", icon.into_os_string())] {
+                for (name, value) in [("DisplayName", std::ffi::OsString::from("Potato")), ("IconUri", icon.clone().into_os_string())] {
                     let v = value.encode_wide_z();
                     let bytes = std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len() * 2);
                     let _ = RegSetValueExW(key, PCWSTR(std::ffi::OsStr::new(name).encode_wide_z().as_ptr()), None, REG_SZ, Some(bytes));
@@ -398,7 +399,8 @@ fn register_toast_name() {
                 let _ = RegCloseKey(key);
             }
         }
-    });
+        icon
+    })
 }
 
 /// (in use, total) bytes of RAM.
