@@ -557,6 +557,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]   // reads the demo Windows; a real one answers with its own state
     fn look_reads_status_and_skips_it_in_accounts() {
         let r = look();   // the demo PowerShell answers with the same lines Windows does
         assert_eq!((r.service.as_str(), r.port.as_str(), r.listening), ("Running", "3389", true));
