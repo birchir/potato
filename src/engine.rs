@@ -394,7 +394,10 @@ impl Engine {
         for c in &self.clients {
             let a = self.config.account(&c.sid);
             let stale = self.whereabouts.get(&c.pid).is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(30));
-            if a.on && a.rejoin_crashed && stale {
+            // a client stuck without a window (no internet) is closed by the helper after STUCK_AFTER; watching it
+            // sooner made that close look like a crash, and the rejoin started another stuck one, all night
+            let settled = system_time_now().saturating_sub(c.started) >= (config::STUCK_AFTER.as_secs() + 60) * 10_000_000;
+            if a.on && a.rejoin_crashed && stale && settled {
                 let log = self.profiles.iter().find(|p| p.sid == c.sid).and_then(|p| files::client_log(&p.local, c.started));
                 if let Some(s) = rejoin::server(system::command_line(c.pid).as_deref(), log.as_deref()) {
                     self.whereabouts.insert(c.pid, (s, Instant::now()));
