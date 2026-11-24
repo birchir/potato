@@ -44,6 +44,12 @@ fn save(h: &mut Harness<'static, potato::app::App>, name: &str) {
 #[test]
 #[ignore]
 fn draw_the_window() {
+    let mut h = harness([1180.0, 800.0]);   // the window's own size when it opens
+    for size in ["Small", "Medium", "Large"] {
+        h.get_by_role_and_label(egui::accesskit::Role::RadioButton, size).click();
+        h.run_steps(4);
+        save(&mut h, &format!("tiles-{}", size.to_lowercase()));
+    }
     let mut h = harness([1000.0, 760.0]);
     save(&mut h, "default");
     h.get_by_label("Free Roblox RAM").click();
@@ -58,7 +64,7 @@ fn draw_the_window() {
     h.run_steps(4);
     save(&mut h, "whole-pc");
     let mut h = harness([1000.0, 1100.0]);
-    h.get_by_role_and_label(egui::accesskit::Role::Tab, "Remote Desktop").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Tab, "RDPs").click();
     h.run_steps(4);
     save(&mut h, "rdp");
 }
@@ -156,37 +162,54 @@ fn click_and_type_everywhere() {
     assert_eq!(saved()["accounts"]["S-1-5-21-3"]["mute"], false, "Mute switch flips");
     save(&mut h, "clicked-account");
 
-    // Performance: the guide checklist's one button, then the core split by hand
+    // Performance: Optimize Now, a switch back off, then the core split by hand
     h.get_by_role_and_label(Role::Tab, "Performance").click();
     steps(&mut h, 10);
-    h.get_by_role_and_label(Role::Button, "Turn On All Of These").click();
+    h.get_by_role_and_label(Role::Button, "Optimize Now").click();
     steps(&mut h, 30);
-    assert_eq!(saved()["helperCores"], 2, "Turn On All put Remote Desktops on their own cores");
+    assert_eq!((saved()["helperCores"].as_u64(), saved()["trimMinutes"].as_u64()), (Some(2), Some(5)), "Optimize Now separated RDP cores and frees RAM every 5 min");
     let p = potato::power::read();
     assert!(p.high_performance && p.boost_off && p.fast_startup_off, "and applied every power setting");
     assert!(!p.updates_off, "but never stops Windows Updates by itself");
-    assert!(h.get_all_by_role_and_label(Role::Button, "Undo").count() >= 4, "done items offer Undo");
-    h.get_all_by_role_and_label(Role::Button, "Undo").nth(2).unwrap().click();   // the power plan (after the RAM timer and cores)
+    assert!(h.query_by_label("Your PC is fully optimized").is_some());
+    h.get_by_role_and_label(Role::Switch, "High Performance Power Plan").click();
     steps(&mut h, 30);
-    assert!(!potato::power::read().high_performance, "Undo puts the power plan back");
+    assert!(!potato::power::read().high_performance, "its switch puts the power plan back");
     h.get_by_role_and_label(Role::Button, "Stop Windows Updates").click();
     steps(&mut h, 30);
     assert!(potato::power::read().updates_off && saved()["blockUpdates"] == true, "Stop Windows Updates stops them and remembers it");
     assert!(h.query_all_by_label_contains("Microsoft Store").count() >= 2, "and warns about the Microsoft Store, on the page and when it's done");
-    h.get_by_label("Cores For Remote Desktop And Macros").click();
+    h.get_by_label("Cores For RDPs And Macros").click();
     steps(&mut h, 4);
     h.get_by_label("Last 3 Cores").click();
     steps(&mut h, 4);
     assert_eq!(saved()["helperCores"], 3);
     save(&mut h, "clicked-performance");
 
-    // Remote Desktop: boosting size, a desktop shortcut, a new account typed in
-    h.get_by_role_and_label(Role::Tab, "Remote Desktop").click();
+    // RDPs: the lag switches answer (the demo Windows keeps its answers, so the toast is the check)
+    h.get_by_role_and_label(Role::Tab, "RDPs").click();
+    steps(&mut h, 6);
+    h.get_by_role_and_label(Role::Switch, "60 FPS In RDPs").scroll_to_me();
+    steps(&mut h, 4);
+    h.get_by_role_and_label(Role::Switch, "60 FPS In RDPs").click();
+    steps(&mut h, 30);
+    assert!(h.query_by_label_contains("Reconnect Your RDPs").is_some(), "a switch changes Windows");
+    save(&mut h, "rdp-lag");
+    h.get_by_role_and_label(Role::Button, "Make Every Account Never Expire").scroll_to_me();
+    steps(&mut h, 4);
+    h.get_by_role_and_label(Role::Button, "Make Every Account Never Expire").click();
+    steps(&mut h, 30);
+    assert!(h.query_by_label_contains("Never Expires").is_some(), "Never Expire ran");
+
+    // RDPs: boosting size, a desktop shortcut, a new account typed in
+    h.get_by_role_and_label(Role::Tab, "RDPs").click();
     steps(&mut h, 6);
     h.get_by_role_and_label(Role::Button, "Stop Windows Updates").click();   // now its Undo, shown here too
     steps(&mut h, 30);
     assert!(!potato::power::read().updates_off && saved()["blockUpdates"] == false, "Undo turns updates back on");
-    h.get_all_by_role_and_label(Role::RadioButton, "Wide 1800x768").next().expect("Alt1's size").click();
+    h.get_all_by_role_and_label(Role::RadioButton, "Wide 1800x768").next().expect("Alt1's size").scroll_to_me();
+    steps(&mut h, 4);
+    h.get_all_by_role_and_label(Role::RadioButton, "Wide 1800x768").next().unwrap().click();
     steps(&mut h, 4);
     assert_eq!(saved()["rdpWide"], serde_json::json!(["Alt1"]));
     let file = std::fs::read_to_string(data_dir().join("Potato").join("rdp").join("Alt1.rdp")).expect("Alt1.rdp written");
@@ -199,6 +222,13 @@ fn click_and_type_everywhere() {
     h.get_all_by_label("Desktop Shortcut").next().unwrap().click();
     steps(&mut h, 6);
     assert!(h.query_by_label_contains("On Your Desktop").is_some(), "the shortcut says where it went");
+    h.get_all_by_label("Remove").next().unwrap().click();
+    steps(&mut h, 2);
+    h.get_by_label("Click Again To Remove").click();
+    steps(&mut h, 30);
+    assert!(h.query_by_label_contains("Removed The Alt").is_some(), "Remove asks twice, then removes");
+    h.get_by_role_and_label(Role::Button, "Add Alt").scroll_to_me();   // below the fold since the RDP Status card
+    steps(&mut h, 4);
     h.get_by_role_and_label(Role::TextInput, "Name").focus();
     steps(&mut h, 2);
     h.get_by_role_and_label(Role::TextInput, "Name").type_text("Alt3");
@@ -211,6 +241,11 @@ fn click_and_type_everywhere() {
     h.get_by_role_and_label(Role::Button, "Add Alt").click();
     steps(&mut h, 30);
     assert_eq!(h.get_by_role_and_label(Role::TextInput, "Name").value().as_deref(), Some(""), "the name box clears once the account is made");
+    if h.query_by_label_contains("not open yet").is_some() {
+        h.get_by_role_and_label(Role::Button, "Open Every Alt").click();
+        steps(&mut h, 6);
+        assert!(h.query_by_label_contains("Remote Desktop").is_some(), "Open All tried to open them (no Remote Desktop app off Windows)");
+    }
     save(&mut h, "clicked-rdp");
 
     // Settings: a wrong webhook is caught as it's typed

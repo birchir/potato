@@ -397,11 +397,16 @@ pub fn link(ui: &mut Ui, text: &str) -> egui::Response {
 
 /// A dot and a word, like "● Running": green when on, grey when off. No box around it.
 pub fn status(ui: &mut Ui, text: &str, on: bool) {
-    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+    // in a row's right-aligned control slot it lines up on the right, dot still first
+    let rtl = ui.layout().prefer_right_to_left();
+    let layout = if rtl { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+    ui.with_layout(layout, |ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
+        let word = |ui: &mut Ui| { ui.label(RichText::new(text).size(12.5).color(if on { DIM } else { FAINT })); };
+        if rtl { word(ui); }
         let (r, _) = ui.allocate_exact_size(vec2(7.0, 14.0), Sense::hover());
         ui.painter().circle_filled(r.center(), 3.5, if on { GOOD } else { OFF });
-        ui.label(RichText::new(text).size(12.5).color(if on { DIM } else { FAINT }));
+        if !rtl { word(ui); }
     });
 }
 
@@ -511,19 +516,6 @@ pub fn centered_note(ui: &Ui, rect: egui::Rect, title: &str, note: &str) {
     let p = ui.painter();
     p.text(rect.center() - vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, title, egui::FontId::new(13.5, FontFamily::Name("semi".into())), DIM);
     p.text(rect.center() + vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, note, egui::FontId::proportional(12.0), FAINT);
-}
-
-/// A filled green circle with a tick (done) or an empty ring (not yet), for checklists.
-pub fn check(ui: &mut Ui, done: bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-    let p = ui.painter();
-    let c = rect.center();
-    if done {
-        p.circle_filled(c, 8.0, GOOD);
-        p.add(egui::Shape::line(vec![c + vec2(-3.6, 0.2), c + vec2(-1.0, 2.8), c + vec2(3.8, -2.6)], Stroke::new(1.8, CANVAS)));
-    } else {
-        p.circle_stroke(c, 7.5, Stroke::new(1.4, LINE_HI));
-    }
 }
 
 pub fn style(ctx: &egui::Context) {

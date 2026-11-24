@@ -1,5 +1,7 @@
-//! Remote Desktop alts. Windows Pro lets one person on at a time; the usual fix patches the session check in
-//! termsrv.dll (the same bytes as the well-known PowerShell patch), and a Windows update can put the old file back.
+//! Remote Desktop alts. Windows lets one person on at a time. Multiple RDPs loads TermWrap (github.com/llccd/TermWrap,
+//! MIT) into the Remote Desktop service in place of termsrv.dll: it finds the session check in memory on every
+//! Windows build, so updates don't undo it. Older Potatos patched the file itself, which an update puts back; that
+//! is still read and undone.
 //! Alts are plain Windows users in the Remote Desktop Users group (what Computer Management does by hand), each
 //! opened on its own 127.x loopback address with its login saved in Windows' Credential Manager.
 
@@ -11,8 +13,11 @@ use crate::system;
 const SESSION_CHECK: [u8; 6] = [0x39, 0x81, 0x3C, 0x06, 0x00, 0x00];
 /// `mov eax, 100h; mov [rcx+638h], eax; nop`: always room for another session
 const PATCHED: [u8; 12] = [0xB8, 0x00, 0x01, 0x00, 0x00, 0x89, 0x81, 0x38, 0x06, 0x00, 0x00, 0x90];
-/// the Remote Desktop Users group, by SID so it works in every Windows language
-const RDP_USERS: &str = "S-1-5-32-555";
+/// TermWrap's release, pinned to the file checked here (a new version needs a new hash)
+const TERMWRAP_ZIP: &str = "https://github.com/llccd/TermWrap/releases/download/v0.7/TermWrap-0.7.zip";
+const TERMWRAP_SHA256: &str = "096cc075e4d2ebbf2587f19d5e9a3003181e1d3ae44c514e0532ba222f82afc4";
+/// TermWrap needs Microsoft's Visual C++ runtime
+const VC_REDIST: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Patch {
@@ -21,7 +26,7 @@ pub enum Patch {
     Unknown,
     Patched,
     Unpatched,
-    /// neither pattern: a Windows build this patch doesn't fit
+    /// not a 64-bit Intel or AMD PC (TermWrap's x64 build is the one Potato installs)
     Unsupported,
 }
 
@@ -37,6 +42,70 @@ pub struct Rdp {
     pub busy: Option<&'static str>,
     /// a result for the toast
     pub msg: Option<String>,
+    /// Windows' version and build, e.g. "22H2, build 19045.6466"
+    pub windows: String,
+    /// the Remote Desktop service's state ("Running", "Stopped"), empty if it's missing
+    pub service: String,
+    /// the port Remote Desktop listens on, and whether it is listening right now
+    pub port: String,
+    pub listening: bool,
+    /// the lag and picture settings below, as Windows has them now
+    pub tcp_only: bool,
+    pub fps60: bool,
+    pub hide_alts: bool,
+    /// Windows' ImageQuality / MaxCompressionLevel, None when left to Windows
+    pub quality: Option<u32>,
+    pub compression: Option<u32>,
+}
+
+/// Group Policy's Remote Desktop key: what `gpedit` writes, so Windows reads it without gpedit (Home has none).
+const POLICY: &str = r"HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services";
+const WINSTATIONS: &str = r"HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations";
+const SIGN_IN_LIST: &str = r"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList";
+
+/// The RDP settings Potato can change, Windows-wide. Values are from Windows' own TerminalServer.admx (and
+/// Microsoft's 30 FPS article for the frame rate).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Setting {
+    /// "Select RDP transport protocols: Use only TCP" for this PC as host and as client
+    TcpOnly,
+    /// DWMFRAMEINTERVAL 15: 60 FPS instead of 30
+    Fps60,
+    /// each alt hidden from Windows' sign-in screen (they still sign in over RDP)
+    HideAlts,
+    /// ImageQuality: 1 Lossless, 2 High, 3 Medium, 4 Low
+    Quality,
+    /// MaxCompressionLevel: 0 Off, 1 Less Memory, 2 Balanced, 3 Less Bandwidth
+    Compression,
+}
+
+/// The registry writes for a setting as `key|name|value` lines; an empty value removes it (back to Windows'
+/// default). `alts` are the accounts HideAlts covers; `me` is never hidden.
+pub fn writes(setting: Setting, value: Option<u32>, alts: &[String], me: &str) -> Vec<String> {
+    let v = value.map(|v| v.to_string()).unwrap_or_default();
+    match setting {
+        Setting::TcpOnly => vec![format!("{POLICY}|SelectTransport|{v}"), format!("{POLICY}\\Client|fClientDisableUDP|{v}")],
+        Setting::Fps60 => vec![format!("{WINSTATIONS}|DWMFRAMEINTERVAL|{v}")],
+        Setting::Quality => vec![format!("{POLICY}|ImageQuality|{v}")],
+        Setting::Compression => vec![format!("{POLICY}|MaxCompressionLevel|{v}")],
+        Setting::HideAlts => alts.iter().filter(|a| !a.eq_ignore_ascii_case(me)).map(|a| format!("{SIGN_IN_LIST}|{a}|{v}")).collect(),
+    }
+}
+
+const WRITE: &str = r#"
+$ErrorActionPreference = 'Stop'
+foreach ($l in $env:POTATO_SET -split "`n") {
+    $k, $n, $v = $l -split '\|'
+    if ($v -eq '') { Remove-ItemProperty $k $n -ErrorAction SilentlyContinue; continue }
+    if (-not (Test-Path $k)) { New-Item $k -Force | Out-Null }
+    Set-ItemProperty $k $n ([int]$v) -Type DWord
+}
+"#;
+
+/// Change one setting (None puts Windows' default back).
+pub fn set(setting: Setting, value: Option<u32>, alts: &[String]) -> Result<(), String> {
+    let lines = writes(setting, value, alts, &std::env::var("USERNAME").unwrap_or_default()).join("\n");
+    system::powershell(WRITE, &[("POTATO_SET", &lines)]).map(|_| ()).map_err(|_| "Windows Didn't Let Potato Change It".into())
 }
 
 impl Rdp {
@@ -100,17 +169,139 @@ fn original() -> PathBuf {
     store().join("termsrv.dll.original")
 }
 
+/// Whether the Remote Desktop service loads a wrapper (TermWrap, or RDP Wrapper someone installed) instead of
+/// Windows' own termsrv.dll.
+pub fn is_wrapper(service_dll: &str) -> bool {
+    let s = service_dll.to_ascii_lowercase();
+    s.contains("termwrap") || s.contains("rdpwrap")
+}
+
+/// The service's DLL, then each alt (Remote Desktop Users, by SID so it works in every Windows language). Every alt's password is set to never expire on the way: Windows makes local
+/// passwords expire after 42 days, and an expired one locks the alt out of Remote Desktop.
+const LOOK: &str = r#"
+$cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+"WINDOWS=$($cv.DisplayVersion), build $($cv.CurrentBuild).$($cv.UBR)"
+"SERVICE=" + (Get-Service TermService -ErrorAction SilentlyContinue).Status
+$port = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -ErrorAction SilentlyContinue).PortNumber
+"PORT=$port"
+"LISTENING=" + [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+"SERVICEDLL=" + (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters' -ErrorAction SilentlyContinue).ServiceDll
+$pol = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -ErrorAction SilentlyContinue
+"TCPONLY=" + ($pol.SelectTransport -eq 1)
+"QUALITY=$($pol.ImageQuality)"
+"COMPRESSION=$($pol.MaxCompressionLevel)"
+"FPS60=" + ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -ErrorAction SilentlyContinue).DWMFRAMEINTERVAL -eq 15)
+$hk = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
+$hidden = Get-ItemProperty $hk -ErrorAction SilentlyContinue
+$alts = @(Get-LocalGroupMember -SID S-1-5-32-555 | ForEach-Object { [pscustomobject]@{ n = $_.Name.Split('\')[-1]; local = "$($_.PrincipalSource)" -eq 'Local' } })
+$hide = [bool]($alts | Where-Object { $hidden -and $hidden.($_.n) -eq 0 })
+"HIDEALTS=$hide"
+foreach ($a in $alts) {
+    if ($a.local) { Set-LocalUser -Name $a.n -PasswordNeverExpires $true -ErrorAction SilentlyContinue }
+    # once alts are hidden, a new one is hidden too (never you)
+    if ($hide -and $a.local -and $a.n -ne $env:USERNAME -and $hidden.($a.n) -ne 0) { Set-ItemProperty $hk $a.n 0 -Type DWord }
+    $a.n
+}
+"#;
+
 /// Look at everything the page shows.
 pub fn look() -> Rdp {
+    let out = system::powershell(LOOK, &[]).unwrap_or_default();
+    let tag = |t: &str| out.lines().find_map(|l| l.trim().strip_prefix(t)).unwrap_or_default().to_string();
+    let service_dll = tag("SERVICEDLL=");
+    // Windows names can't hold '=', so every tagged line is skipped
+    let accounts = out.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains('=')).map(String::from).collect();
+    let wrapped = is_wrapper(&service_dll);
     let dll = std::fs::read(termsrv()).ok();
-    let patch = dll.as_deref().map_or(Patch::Unknown, patch_state);
-    let can_undo = patch == Patch::Patched
-        && std::fs::read(original()).ok().and_then(|o| patched(&o)).is_some_and(|p| Some(p) == dll);
-    let accounts = system::powershell(&format!("Get-LocalGroupMember -SID {RDP_USERS} | ForEach-Object {{ $_.Name.Split('\\')[-1] }}"), &[])
-        .map(|out| out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
-        .unwrap_or_default();
-    Rdp { patch, accounts, can_undo, ..Rdp::default() }
+    let patch = match dll.as_deref().map(patch_state) {
+        _ if wrapped => Patch::Patched,
+        _ if std::env::var("PROCESSOR_ARCHITECTURE").is_ok_and(|a| !a.eq_ignore_ascii_case("AMD64")) => Patch::Unsupported,
+        Some(Patch::Patched) => Patch::Patched,   // an older Potato's patch of the file
+        Some(_) => Patch::Unpatched,
+        None => Patch::Unknown,
+    };
+    let can_undo = wrapped || (patch == Patch::Patched
+        && std::fs::read(original()).ok().and_then(|o| patched(&o)).is_some_and(|p| Some(p) == dll));
+    Rdp { patch, accounts, can_undo, windows: tag("WINDOWS="), service: tag("SERVICE="), port: tag("PORT="),
+          listening: tag("LISTENING=").eq_ignore_ascii_case("true"), tcp_only: tag("TCPONLY=") == "True", fps60: tag("FPS60=") == "True",
+          hide_alts: tag("HIDEALTS=") == "True", quality: tag("QUALITY=").parse().ok(), compression: tag("COMPRESSION=").parse().ok(), ..Rdp::default() }
 }
+
+/// Restart Remote Desktop so it loads its DLL again: open RDPs drop for a moment and reconnect, Roblox in them
+/// keeps running. The service shares nothing, but stopping it can hang, so its process is ended too.
+const RESTART: &str = r#"
+Stop-Service UmRdpService -Force -ErrorAction SilentlyContinue
+Stop-Service TermService -Force -ErrorAction SilentlyContinue
+$p = (Get-CimInstance Win32_Service -Filter "Name='TermService'").ProcessId
+if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 2
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' fDenyTSConnections 0
+Start-Service TermService
+Start-Service UmRdpService -ErrorAction SilentlyContinue
+"#;
+
+/// Windows' RDP service restarted: fixes alts that won't connect.
+pub fn restart_service() -> Result<(), String> {
+    system::powershell(RESTART, &[]).map(|_| ()).map_err(|_| "Couldn't Restart The RDP Service".into())
+}
+
+/// Every local account's password and the account itself set to never expire (Windows makes local passwords
+/// expire after 42 days, and an expired one can't sign in over RDP).
+pub fn never_expire() -> Result<(), String> {
+    const ALL: &str = "Get-LocalUser | Where-Object Enabled | ForEach-Object { Set-LocalUser -Name $_.Name -PasswordNeverExpires $true -AccountNeverExpires -ErrorAction SilentlyContinue }";
+    system::powershell(ALL, &[]).map(|_| ()).map_err(|_| "Couldn't Change The Accounts".into())
+}
+
+/// Put back the Remote Desktop service when something deleted it: Windows' own settings for it (svchost's
+/// NetworkService group, termsrv.dll), then started.
+const REPAIR: &str = r#"
+$ErrorActionPreference = 'Stop'
+if (-not (Get-Service TermService -ErrorAction SilentlyContinue)) {
+    sc.exe create TermService type= share start= demand binPath= "%SystemRoot%\System32\svchost.exe -k NetworkService" obj= "NT Authority\NetworkService" DisplayName= "@%SystemRoot%\System32\termsrv.dll,-268" depend= RPCSS | Out-Null
+    $p = 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters'
+    New-Item $p -Force | Out-Null
+    Set-ItemProperty $p ServiceDll '%SystemRoot%\System32\termsrv.dll' -Type ExpandString
+    Set-ItemProperty $p ServiceDllUnloadOnStop 1 -Type DWord
+    # its own service identity and privileges, as Windows ships it: without them it runs but never listens
+    sc.exe sidtype TermService unrestricted | Out-Null
+    sc.exe privs TermService SeAssignPrimaryTokenPrivilege/SeAuditPrivilege/SeChangeNotifyPrivilege/SeCreateGlobalPrivilege/SeImpersonatePrivilege/SeIncreaseQuotaPrivilege | Out-Null
+    sc.exe failure TermService reset= 86400 actions= restart/60000/restart/60000//60000 | Out-Null
+    sc.exe description TermService "@%SystemRoot%\System32\termsrv.dll,-267" | Out-Null
+    $g = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost'
+    $list = @((Get-ItemProperty $g).NetworkService)
+    if ($list -notcontains 'TermService') { Set-ItemProperty $g NetworkService ($list + 'TermService') -Type MultiString }
+}
+"#;
+
+pub fn repair_service() -> Result<(), String> {
+    system::powershell(&format!("{REPAIR}{RESTART}"), &[]).map(|_| ()).map_err(|_| "Couldn't Repair The RDP Service".into())
+}
+
+/// Microsoft's C++ runtime if it's missing (signed by Microsoft or not run), TermWrap's DLLs from the checked zip,
+/// then the service pointed at TermWrap and restarted.
+const INSTALL: &str = r#"
+$ErrorActionPreference = 'Stop'
+if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64' -ErrorAction SilentlyContinue).Installed -ne 1) {
+    $vc = Join-Path $env:TEMP 'potato_vc_redist.x64.exe'
+    curl.exe -sfL -m 300 -o $vc $env:POTATO_VC
+    $sig = Get-AuthenticodeSignature $vc
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw 'not signed by Microsoft' }
+    Start-Process $vc -ArgumentList '/install', '/quiet', '/norestart' -Wait
+    Remove-Item $vc -Force -ErrorAction SilentlyContinue
+}
+$x = Join-Path $env:TEMP 'potato_termwrap'
+Remove-Item $x -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive $env:POTATO_ZIP $x
+$d = "$env:ProgramFiles\RDP Wrapper"
+New-Item -ItemType Directory -Force $d | Out-Null
+Copy-Item "$x\x64\TermWrap.dll", "$x\x64\Zydis.dll" $d -Force
+Remove-Item $x -Recurse -Force -ErrorAction SilentlyContinue
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters' ServiceDll '%ProgramFiles%\RDP Wrapper\TermWrap.dll' -Type ExpandString
+"#;
+
+const UNWRAP: &str = r#"
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters' ServiceDll '%SystemRoot%\System32\termsrv.dll' -Type ExpandString
+"#;
 
 /// Swap Windows' termsrv.dll for `new`. Remote Desktop stops for a moment (open windows drop and reconnect); the
 /// file's owner (TrustedInstaller) and rights go back on after, and the service always starts again.
@@ -140,24 +331,35 @@ fn swap_in(new: &Path) -> Result<(), String> {
     system::powershell(SWAP, &[("POTATO_NEW", &new.to_string_lossy())]).map(|_| ())
 }
 
-/// Let every account on at once. Keeps this Windows' original file so it can be undone.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Multiple RDPs on: TermWrap downloaded, checked against its pinned hash, and loaded by Remote Desktop.
 pub fn patch() -> Result<(), String> {
-    let dll = std::fs::read(termsrv()).map_err(|_| "Couldn't Read Windows' Remote Desktop File".to_string())?;
-    let new = patched(&dll).ok_or("Potato's Patch Doesn't Fit This Windows Version Yet")?;
+    let zip = crate::engine::fetch(TERMWRAP_ZIP, 120).ok_or("Couldn't Download TermWrap. Check Your Internet")?;
+    if sha256_hex(&zip) != TERMWRAP_SHA256 {
+        return Err("TermWrap's Download Didn't Match, So Nothing Was Changed".into());
+    }
     std::fs::create_dir_all(store()).map_err(|e| e.to_string())?;
-    std::fs::write(original(), &dll).map_err(|e| e.to_string())?;
-    let tmp = store().join("termsrv.dll.patched");
-    std::fs::write(&tmp, new).map_err(|e| e.to_string())?;
-    let done = swap_in(&tmp);
-    let _ = std::fs::remove_file(&tmp);
-    done?;
+    let file = store().join("TermWrap.zip");
+    std::fs::write(&file, zip).map_err(|e| e.to_string())?;
+    let done = system::powershell(&format!("{INSTALL}{RESTART}"), &[("POTATO_ZIP", &file.to_string_lossy()), ("POTATO_VC", VC_REDIST)]);
+    let _ = std::fs::remove_file(&file);
+    done.map_err(|_| "Windows Didn't Let Potato Change It".to_string())?;
     if look().patch == Patch::Patched { Ok(()) } else { Err("Windows Didn't Let Potato Change It".into()) }
 }
 
-/// Put Windows' own file back.
+/// Multiple RDPs off: Remote Desktop back on Windows' own termsrv.dll (or an older Potato's patched file put back).
 pub fn undo() -> Result<(), String> {
-    swap_in(&original())?;
-    if look().patch == Patch::Unpatched { Ok(()) } else { Err("Couldn't Put Windows' File Back".into()) }
+    let wrapped = is_wrapper(&system::powershell(LOOK, &[]).unwrap_or_default().lines().find_map(|l| l.trim().strip_prefix("SERVICEDLL=").map(String::from)).unwrap_or_default());
+    if wrapped {
+        system::powershell(&format!("{UNWRAP}{RESTART}"), &[])?;
+    } else {
+        swap_in(&original())?;
+    }
+    if look().patch == Patch::Unpatched { Ok(()) } else { Err("Couldn't Turn It Off".into()) }
 }
 
 /// Make a Windows user in Remote Desktop Users (or add an existing one) and save its login for Open.
@@ -179,6 +381,33 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' fDenyT
     if system::save_rdp_login(&address(name), name, password) { Ok(()) } else { Err("Added The Alt, But Couldn't Save Its Password".into()) }
 }
 
+/// Remove an alt: signed out, its Windows account and its files (C:\Users\<name>, Roblox in it too) deleted, or just
+/// taken out of Remote Desktop Users if it isn't a local account; then its saved login, .rdp file and desktop shortcut.
+pub fn remove_account(name: &str) -> Result<(), String> {
+    const REMOVE: &str = r#"
+$n = $env:POTATO_USER
+quser 2>$null | Select-String -Pattern "^\s*>?$([regex]::Escape($n))\s" | ForEach-Object {
+    $id = ($_.Line.Trim() -split '\s+') | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1
+    if ($id) { logoff $id }
+}
+$ErrorActionPreference = 'Stop'   # after quser: its "no sessions" stderr would stop the script
+$u = Get-LocalUser -Name $n -ErrorAction SilentlyContinue
+if ($u) {
+    Start-Sleep -Seconds 3
+    Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $u.SID.Value } | Remove-CimInstance -ErrorAction SilentlyContinue
+    Remove-LocalUser -Name $n
+} else {
+    Get-LocalGroupMember -SID S-1-5-32-555 | Where-Object { $_.Name.Split('\')[-1] -eq $n } | ForEach-Object { Remove-LocalGroupMember -SID S-1-5-32-555 -Member $_ }
+}
+cmdkey "/delete:TERMSRV/$env:POTATO_ADDR" | Out-Null
+Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) "$n (Remote Desktop).lnk") -Force -ErrorAction SilentlyContinue
+Remove-Item $env:POTATO_RDP -Force -ErrorAction SilentlyContinue
+"#;
+    let rdp = store().join("rdp").join(format!("{name}.rdp"));
+    system::powershell(REMOVE, &[("POTATO_USER", name), ("POTATO_ADDR", &address(name)), ("POTATO_RDP", &rdp.to_string_lossy())])
+        .map(|_| ()).map_err(|_| format!("Couldn't Remove {name}"))
+}
+
 /// The account's Remote Desktop settings, as the user's RDP Plus shortcuts set them up
 /// (`/title:"Alt2" /nodrives /nosound /nowallpaper /o:"keyboardhook:i:0" /w:1366 /h:768`), written as an .rdp file because
 /// Windows' own Remote Desktop only takes those as file settings. `wide` is the guide's 1800x768 for boosting and
@@ -197,6 +426,16 @@ pub fn rdp_file(name: &str, wide: bool) -> String {
         "redirectprinters:i:0".into(),
         "redirectclipboard:i:1".into(),
         "disable wallpaper:i:1".into(),   // /nowallpaper
+        // less for Remote Desktop to draw: no themes, animations, font smoothing or see-through windows
+        "allow font smoothing:i:0".into(),
+        "allow desktop composition:i:0".into(),
+        "disable full window drag:i:1".into(),
+        "disable menu anims:i:1".into(),
+        "disable themes:i:1".into(),
+        // it's this PC talking to itself: guessing the connection speed often settles on a slow one, so say LAN
+        "networkautodetect:i:0".into(),
+        "bandwidthautodetect:i:0".into(),
+        "connection type:i:6".into(),
         "keyboardhook:i:0".into(),        // /o:"keyboardhook:i:0": Windows key shortcuts stay on this PC, not the alt
         "prompt for credentials:i:0".into(),
         "authentication level:i:0".into(),
@@ -309,6 +548,25 @@ mod tests {
     }
 
     #[test]
+    fn settings_write_the_admx_values() {
+        let alts = ["Alt1".to_string(), "Jay".to_string()];
+        assert_eq!(writes(Setting::TcpOnly, Some(1), &[], ""), [format!("{POLICY}|SelectTransport|1"), format!("{POLICY}\\Client|fClientDisableUDP|1")]);
+        assert_eq!(writes(Setting::Fps60, Some(15), &[], ""), [format!("{WINSTATIONS}|DWMFRAMEINTERVAL|15")]);
+        assert_eq!(writes(Setting::Quality, None, &[], ""), [format!("{POLICY}|ImageQuality|")], "None removes it");
+        assert_eq!(writes(Setting::HideAlts, Some(0), &alts, "jay"), [format!("{SIGN_IN_LIST}|Alt1|0")], "never hides you");
+    }
+
+    #[test]
+    fn look_reads_status_and_skips_it_in_accounts() {
+        let r = look();   // the demo PowerShell answers with the same lines Windows does
+        assert_eq!((r.service.as_str(), r.port.as_str(), r.listening), ("Running", "3389", true));
+        assert!(r.windows.contains("build"));
+        assert_eq!(r.accounts, ["Alt1", "Alt2"]);
+        assert!(r.tcp_only && !r.fps60 && !r.hide_alts);
+        assert_eq!((r.quality, r.compression), (Some(4), None));
+    }
+
+    #[test]
     fn startup_task_only_when_picked() {
         assert_eq!(startup_task("S-1", Path::new("C:\\P\\Potato.exe"), false), None);
         let xml = startup_task("S-1-5-21-9", Path::new("C:\\P\\Potato.exe"), true).unwrap();
@@ -317,10 +575,11 @@ mod tests {
     }
 
     #[test]
-    fn rdp_file_has_every_guide_setting() {
+    fn rdp_file_has_every_fast_setting() {
         let f = rdp_file("Alt1", false);
         for line in ["username:s:Alt1", "desktopwidth:i:1366", "desktopheight:i:768", "audiomode:i:2", "redirectdrives:i:0",
-                     "disable wallpaper:i:1", "keyboardhook:i:0", &format!("full address:s:{}", address("Alt1"))] {
+                     "disable wallpaper:i:1", "keyboardhook:i:0", "disable themes:i:1", "connection type:i:6", "networkautodetect:i:0",
+                     &format!("full address:s:{}", address("Alt1"))] {
             assert!(f.split("\r\n").any(|l| l == line), "{line}");
         }
         assert!(rdp_file("Alt1", true).contains("desktopwidth:i:1800\r\n"));
@@ -351,5 +610,16 @@ mod tests {
     #[test]
     fn base64_matches_the_standard() {
         assert_eq!([base64(b""), base64(b"f"), base64(b"fo"), base64(b"foo"), base64(b"foobar")], ["", "Zg==", "Zm8=", "Zm9v", "Zm9vYmFy"]);
+    }
+}
+
+#[cfg(test)]
+mod wrapper_tests {
+    #[test]
+    fn spots_a_wrapper() {
+        assert!(super::is_wrapper(r"C:\Program Files\RDP Wrapper\TermWrap.dll"));
+        assert!(super::is_wrapper(r"C:\Program Files\RDP Wrapper\rdpwrap.dll"));
+        assert!(!super::is_wrapper(r"C:\Windows\System32\termsrv.dll"));
+        assert!(!super::is_wrapper(""));
     }
 }

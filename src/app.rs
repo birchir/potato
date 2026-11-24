@@ -38,10 +38,11 @@ enum Page {
     Settings,
 }
 
-/// How wide each live picture on the Overview is, in points.
-const SMALL: u32 = 220;
-const MEDIUM: u32 = 320;
-const LARGE: u32 = 460;
+/// The smallest each live picture on the Overview may be at each size, in points: as many fit across as can,
+/// then they stretch to fill the row.
+const SMALL: u32 = 200;
+const MEDIUM: u32 = 280;
+const LARGE: u32 = 400;
 
 pub struct App {
     engine: Arc<Mutex<Engine>>,
@@ -49,6 +50,8 @@ pub struct App {
     /// Restart Roblox was clicked once and asks for a second click until then
     confirm_restart: Option<Instant>,
     confirm_debloat: Option<Instant>,
+    /// the alt Remove was clicked on once, and when
+    confirm_remove: Option<(String, Instant)>,
     update_dismissed: bool,
     /// what's typed in each account's FPS box
     fps_text: HashMap<String, String>,
@@ -64,7 +67,7 @@ pub struct App {
     toast: Option<(String, f64)>,
     /// Windows' power and update settings as last read (None until the first read is back)
     power: Arc<Mutex<Option<crate::power::State>>>,
-    /// how wide each live picture on the Overview is (SMALL, MEDIUM or LARGE)
+    /// the live pictures' size on the Overview (SMALL, MEDIUM or LARGE)
     tile_w: u32,
     avatars: crate::avatars::Avatars,
     /// the window, so the tray can show it again (None off Windows: closing then really closes)
@@ -96,6 +99,7 @@ impl App {
             page: Page::Overview,
             confirm_restart: None,
             confirm_debloat: None,
+            confirm_remove: None,
             update_dismissed: false,
             fps_text: HashMap::new(),
             shutdown_text: None,
@@ -261,7 +265,7 @@ impl App {
         let pages = [
             (Icon::Grid, "Overview", Page::Overview, false),
             (Icon::People, "Accounts", Page::Accounts, false),
-            (Icon::Monitor, "Remote Desktop", Page::RemoteDesktop, rdp_warn),
+            (Icon::Monitor, "RDPs", Page::RemoteDesktop, rdp_warn),
             (Icon::Bolt, "Performance", Page::Performance, false),
             (Icon::Sliders, "Settings", Page::Settings, false),
         ];
@@ -313,7 +317,7 @@ impl App {
                         let title = match page {
                             Page::Overview => "Overview",
                             Page::Accounts | Page::Account(_) => "Accounts",
-                            Page::RemoteDesktop => "Remote Desktop",
+                            Page::RemoteDesktop => "RDPs",
                             Page::Performance => "Performance",
                             Page::Settings => "Settings",
                         };
@@ -323,7 +327,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let busy = *self.busy.lock().unwrap();
-                    if action(ui, "Free Roblox RAM", busy == Some("trim")).on_hover_text("Moves RAM every Roblox isn't using right now out of the way").clicked() {
+                    if action(ui, "Free Roblox RAM", busy == Some("trim")).on_hover_text("Frees the RAM every Roblox isn't using right now").clicked() {
                         self.run_action("trim", ui.ctx(), |e| e.trim_all(true));
                     }
                     let armed = self.confirm_restart.is_some_and(|t| t.elapsed() < Duration::from_secs(4));
@@ -339,7 +343,7 @@ impl App {
                     if armed {
                         ui.ctx().request_repaint_after(Duration::from_millis(250));
                     }
-                    if action(ui, "Free PC RAM", busy == Some("clean")).on_hover_text("Clears the files Windows keeps in RAM in case they're needed again").clicked() {
+                    if action(ui, "Free PC RAM", busy == Some("clean")).on_hover_text("Clears files Windows keeps in RAM just in case").clicked() {
                         self.run_action("clean", ui.ctx(), |e| e.clean(true));
                     }
                     if ui.available_width() < 330.0 {
@@ -446,7 +450,7 @@ impl App {
         });
     }
 
-    /// Windows undid the change that lets alts sign in together (an update put its own file back): say so on
+    /// Windows undid Multiple RDPs (an update put its own file back): say so on
     /// every page, with the fix.
     fn rdp_banner(&mut self, ui: &mut Ui, e: &Engine) {
         let r = e.rdp.lock().unwrap().clone();
@@ -455,18 +459,18 @@ impl App {
         }
         let fits = r.patch == Patch::Unpatched;
         let note = if fits {
-            "Only one alt can be signed in until you turn it back on. Stop Windows Updates so this doesn't happen again."
+            "Only one RDP can be signed in until you turn it back on. Stop Windows Updates so it doesn't happen again."
         } else {
-            "Potato can't turn it back on for this Windows version yet. Only one alt can be signed in."
+            "Potato can't turn it back on for this Windows version yet, so only one RDP can be signed in."
         };
         let page = self.page.clone();
         let mut go = false;
-        Self::notice(ui, true, "A Windows Update Turned Off Signing In Alts Together", note, |ui| {
+        Self::notice(ui, true, "A Windows Update Turned Off Multiple RDPs", note, |ui| {
             if fits {
                 if button(ui, if r.busy == Some("patch") { "Turning On" } else { "Turn It Back On" }, r.busy == Some("patch"), true).clicked() {
                     engine::refresh_rdp(e.rdp.clone(), Some("patch"), crate::rdp::patch);
                 }
-            } else if page != Page::RemoteDesktop && action(ui, "Open Remote Desktop", false).clicked() {
+            } else if page != Page::RemoteDesktop && action(ui, "Go To RDPs", false).clicked() {
                 go = true;
             }
         });
@@ -492,7 +496,6 @@ fn meter(ui: &mut Ui, label: &str, value: &str, share: f32) {
 /// One live tile: who it is, the window to picture (None: a Remote Desktop that isn't open), and its Roblox.
 struct Tile {
     name: String,
-    note: &'static str,
     win: Option<crate::preview::Win>,
     /// the Windows user whose Roblox it is (for its RAM, CPU and Free RAM)
     user: Option<String>,
@@ -513,44 +516,27 @@ impl App {
             ("Roblox Is Using", gb(roblox), format!("across {}", plural(e.clients.len(), "Roblox", "Roblox"))),
             ("Freed By Potato", gb(e.freed), "since Potato started".into()),
             ("Roblox CPU", format!("{cpu:.0}%"), "of the whole PC".into()),
-            ("Alts Open", rdps_open.to_string(), format!("of {}", plural(accounts.len(), "alt", "alts"))),
+            ("RDPs Open", rdps_open.to_string(), format!("of {}", plural(accounts.len(), "alt", "alts"))),
         ]);
-        let t = total.max(1) as f32;
-        let pc: Vec<f32> = e.history.iter().map(|s| s.pc_used as f32 / t).chain([used as f32 / t]).collect();
-        let rb: Vec<f32> = e.history.iter().map(|s| s.roblox as f32 / t).chain([roblox as f32 / t]).collect();
-        let span = e.history.first().map_or(0, |s| e.history.last().map_or(0, |l| l.at - s.at));
-        let note = if pc.len() < 3 { "Fills in while Potato runs".to_string() } else { format!("Last {} min", span / 60 + 1) };
-        card(ui, "RAM Over Time", &note, |ui| {
-            Frame::new().inner_margin(Margin::symmetric(16, 12)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    legend(ui, FAINT, "Whole PC");
-                    ui.add_space(10.0);
-                    legend(ui, TEXT, "Roblox");
-                });
-                ui.add_space(6.0);
-                chart(ui, vec2(ui.available_width(), 130.0), &[(&pc, FAINT), (&rb, TEXT)]);
-            });
-        });
-
         // a tile per Remote Desktop alt (open or not), each other Remote Desktop window, then each Roblox window here
         let mut tiles: Vec<Tile> = accounts.iter().map(|n| Tile {
-            name: n.clone(), note: "Remote Desktop",
+            name: n.clone(),
             win: self.wins.iter().find(|w| w.kind == Kind::Rdp(n.clone())).cloned(),
             user: Some(n.clone()), rdp: Some(n.clone()),
         }).collect();
         for w in &self.wins {
             if let Kind::Rdp(label) = &w.kind && !accounts.contains(label) {
-                tiles.push(Tile { name: label.clone(), note: "Remote Desktop", win: Some(w.clone()), user: Some(label.clone()), rdp: None });
+                tiles.push(Tile { name: label.clone(), win: Some(w.clone()), user: Some(label.clone()), rdp: None });
             }
         }
         for w in self.wins.iter().filter(|w| w.kind == Kind::Roblox) {
             let user = e.clients.iter().find(|c| c.pid == w.pid).map(|c| c.user.clone());
-            tiles.push(Tile { name: user.clone().unwrap_or("Roblox".into()), note: "This PC", win: Some(w.clone()), user, rdp: None });
+            tiles.push(Tile { name: user.clone().unwrap_or("Roblox".into()), win: Some(w.clone()), user, rdp: None });
         }
         ui.horizontal(|ui| {
             ui.label(semi("Live", 14.0).color(TEXT));
             ui.add_space(4.0);
-            ui.label(small("Click a picture to bring that window to the front"));
+            ui.label(small("Click a picture to go to that window"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let id = ui.scope_id().with("tile-size");
                 segmented(ui, id, &mut self.tile_w, &[(SMALL, "Small"), (MEDIUM, "Medium"), (LARGE, "Large")]);
@@ -562,16 +548,25 @@ impl App {
                 Frame::new().inner_margin(Margin::same(28)).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(semi("Nothing Open Yet", 14.0).color(TEXT));
-                        ui.label(small("Open Roblox, or add an alt on the Remote Desktop page, and it shows up here live."));
+                        ui.label(small("Open Roblox, or add an alt on the RDPs page, and it shows up here live."));
                     });
                 });
             });
+            ui.add_space(12.0);
+            self.ram_card(ui, e);
             return;
         }
-        // every size is a set width, so Small, Medium and Large always look different, whatever the window size
-        let gap = 10.0;
-        let w = (self.tile_w as f32).min(ui.available_width());
-        let cols = (((ui.available_width() + gap) / (w + gap)) as usize).max(1);
+        // pictures fill the row; each size has fewer across than the one below it, so all three always differ
+        let (gap, avail) = (10.0, ui.available_width());
+        let fit = |min: u32| (((avail + gap) / (min as f32 + gap)) as usize).max(1);
+        let small = fit(SMALL);
+        let medium = fit(MEDIUM).min(small - 1).max(1);
+        let cols = match self.tile_w {
+            SMALL => small,
+            MEDIUM => medium,
+            _ => fit(LARGE).min(medium - 1).max(1),
+        };
+        let w = ((avail - gap * (cols - 1) as f32) / cols as f32).floor();
         let mut act: Option<(&'static str, String)> = None;
         for row in tiles.chunks(cols) {
             ui.horizontal_top(|ui| {
@@ -593,6 +588,30 @@ impl App {
             Some(("trim", user)) => self.run_action("trim", ui.ctx(), move |e| e.trim_user(&user)),
             _ => {}
         }
+        ui.add_space(12.0);
+        self.ram_card(ui, e);
+    }
+
+    /// RAM over the last while: the whole PC and Roblox.
+    fn ram_card(&self, ui: &mut Ui, e: &Engine) {
+        let (used, total) = e.memory;
+        let roblox: u64 = e.clients.iter().map(|c| c.ram).sum();
+        let t = total.max(1) as f32;
+        let pc: Vec<f32> = e.history.iter().map(|s| s.pc_used as f32 / t).chain([used as f32 / t]).collect();
+        let rb: Vec<f32> = e.history.iter().map(|s| s.roblox as f32 / t).chain([roblox as f32 / t]).collect();
+        let span = e.history.first().map_or(0, |s| e.history.last().map_or(0, |l| l.at - s.at));
+        let note = if pc.len() < 3 { "Fills in while Potato runs".to_string() } else { format!("Last {} min", span / 60 + 1) };
+        card(ui, "RAM Over Time", &note, |ui| {
+            Frame::new().inner_margin(Margin::symmetric(16, 12)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    legend(ui, FAINT, "Whole PC");
+                    ui.add_space(10.0);
+                    legend(ui, TEXT, "Roblox");
+                });
+                ui.add_space(6.0);
+                chart(ui, vec2(ui.available_width(), 130.0), &[(&pc, FAINT), (&rb, TEXT)]);
+            });
+        });
     }
 
     /// One live tile. Returns what was clicked: ("open", alt) or ("trim", user).
@@ -616,33 +635,42 @@ impl App {
                         centered_note(ui, rect, "Live Picture", "Shows here on Windows");
                     }
                 }
-                Some(_) => centered_note(ui, rect, "Minimized", "Windows stops drawing it. Click to show it"),
-                None => centered_note(ui, rect, "Not Open", "Open it to see it here"),
+                Some(_) => centered_note(ui, rect, "Minimized", "Click to show it"),
+                None if t.rdp.is_some() => centered_note(ui, rect, "Not Open", "Click to open it"),
+                None => centered_note(ui, rect, "Not Open", ""),
             }
-            if let Some(win) = &t.win {
+            if t.win.is_some() || t.rdp.is_some() {
                 let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), dur(0.1));
                 ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, LINE.lerp_to_gamma(TEXT, hover * 0.6)), egui::StrokeKind::Inside);
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    crate::preview::focus(win.hwnd);
+                    match (&t.win, &t.rdp) {
+                        (Some(win), _) => crate::preview::focus(win.hwnd),
+                        (None, Some(n)) => act = Some(("open", n.clone())),
+                        _ => {}
+                    }
                 }
             }
+            let narrow = inner < 250.0;   // Small: the picture is the button, so the name gets the room
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
                 avatar(ui, pic.as_ref(), &t.name, 28.0, !pids.is_empty(), CARD);
                 ui.vertical(|ui| {
-                    ui.set_max_width((inner - 140.0).max(60.0));   // room for the button, never under it
+                    ui.set_max_width((inner - if narrow { 50.0 } else { 140.0 }).max(60.0));   // room for the button, never under it
                     ui.spacing_mut().item_spacing.y = 1.0;
                     ui.add(egui::Label::new(semi(&t.name, 13.5).color(TEXT)).truncate());
-                    let meta = if pids.is_empty() { format!("{} · Roblox closed", t.note) } else { format!("{} · {} · {cpu:.0}% CPU", t.note, gb(ram)) };
+                    let meta = if pids.is_empty() { "Roblox closed".to_string() } else { format!("{} · {cpu:.0}% CPU", gb(ram)) };
                     ui.add(egui::Label::new(small(meta)).truncate());
                 });
+                if narrow {
+                    return;
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(n) = &t.rdp && t.win.is_none() {
                         if primary(ui, "Open").clicked() {
                             act = Some(("open", n.clone()));
                         }
-                    } else if let Some(u) = &t.user && !pids.is_empty() && action(ui, "Free RAM", false).on_hover_text("Moves the RAM this Roblox isn't using out of the way").clicked() {
+                    } else if let Some(u) = &t.user && !pids.is_empty() && action(ui, "Free RAM", false).on_hover_text("Frees the RAM this Roblox isn't using right now").clicked() {
                         act = Some(("trim", u.clone()));
                     }
                 });
@@ -816,16 +844,15 @@ impl App {
         }
     }
 
-    /// Stop Windows Update: one row, used on Performance and Remote Desktop (an update can undo alts signing in
-    /// together). Potato keeps it stopped while it's on, since Windows turns its update service back on by itself.
+    /// Stop Windows Update: one row, used on Performance and RDPs (an update can turn off Multiple RDPs). Potato keeps it stopped while it's on, since Windows turns its update service back on by itself.
     fn updates_row(&mut self, ui: &mut Ui, e: &mut Engine, last: bool) {
         let power = *self.power.lock().unwrap();
         let busy = *self.busy.lock().unwrap();
         let off = power.is_some_and(|p| p.updates_off);
         let note = if off {
-            "On. Windows can't update or restart for updates. The Microsoft Store can't install or update apps (Roblox from the Store too) until you undo this"
+            "On. Windows won't update or restart for updates. The Microsoft Store (and Roblox from the Store) can't install or update apps until you undo this"
         } else {
-            "Windows stops updating and restarting by itself, so an update can't undo Potato's changes. The Microsoft Store can't install or update apps while it's on"
+            "Windows stops updating and restarting by itself. The Microsoft Store can't install or update apps while it's on"
         };
         let mut click = false;
         row(ui, "Stop Windows Updates", note, last, |ui, id| {
@@ -839,109 +866,77 @@ impl App {
         }
     }
 
-    /// The guides as a checklist with one button each, then the whole-PC settings.
+    /// One Optimize card (every PC setting Potato can turn on, one switch each and one button for all), the
+    /// Windows tools, then the settings to fine-tune.
     fn performance_page(&mut self, ui: &mut Ui, e: &mut Engine) {
         let power = *self.power.lock().unwrap();
         let busy = *self.busy.lock().unwrap();
         let cores = e.cores as u32;
-        let rdp_patch = e.rdp.lock().unwrap().patch;
-        enum Fix { Power(Item), Trim, HelperCores, Patch, Accounts }
+        enum Fix { Power(Item), Trim, HelperCores }
         let p = power.unwrap_or_default();
-        let capped = !e.profiles.is_empty() && e.profiles.iter().all(|pr| { let a = e.config.account(&pr.sid); !a.on || a.plan.fps_cap.is_some() });
-        // (done, title, note, what its button does)
+        // (on, title, note, what its switch does)
         let items = [
-            (capped, "FPS Cap On Every Account", "Alts don't need more than 30 frames a second. Set it on each account", Fix::Accounts),
-            (e.config.trim_minutes > 0, "Free Roblox RAM Every 5 Minutes", "Moves RAM Roblox isn't using out of the way, over and over", Fix::Trim),
-            (e.config.helper_cores > 0, "Give Remote Desktop Its Own CPU", "Remote Desktop and macros get the last 2 cores, so they never slow Roblox down", Fix::HelperCores),
-            (p.high_performance, "High Performance Power Plan", "Windows stops slowing your CPU down to save power. Undo goes back to Balanced", Fix::Power(Item::HighPerformance)),
-            (p.boost_off, "Turn Off CPU Boost", "Your CPU stays at its normal speed: less heat and fewer lag spikes with lots of alts", Fix::Power(Item::BoostOff)),
+            (p.high_performance, "High Performance Power Plan", "Windows stops slowing your CPU down to save power. Off goes back to Balanced", Fix::Power(Item::HighPerformance)),
+            (p.boost_off, "Turn Off CPU Boost", "Your CPU stays at its normal speed, so it runs cooler with fewer lag spikes", Fix::Power(Item::BoostOff)),
             (p.fast_startup_off, "Turn Off Fast Startup", "Shutting down really shuts down, so your PC starts fresh every time", Fix::Power(Item::FastStartupOff)),
-            (rdp_patch == Patch::Patched, "Let Alts Sign In Together", "Windows only lets one Remote Desktop sign in at a time until this is on", Fix::Patch),
+            (e.config.trim_minutes > 0, "Free Roblox RAM Every 5 Minutes", "Keeps every Roblox's RAM low while you play", Fix::Trim),
+            (e.config.helper_cores > 0, "Separate CPU Cores For RDPs", "RDPs and macros get the last 2 cores, so they never slow Roblox down", Fix::HelperCores),
+            (p.smooth_rdp, "Smoother RDPs", "Fixes laggy, low FPS RDPs: medium picture quality and a steadier connection. Open RDPs need to reconnect", Fix::Power(Item::SmoothRdp)),
         ];
         let done = items.iter().filter(|i| i.0).count();
-        let mut fix_all = false;
         let mut run: Vec<(&Fix, bool)> = Vec::new();
-        card(ui, "Speed Up This PC", &format!("Everything from the two RDP guides · {done} of {} done", items.len()), |ui| {
-            Frame::new().inner_margin(Margin { left: 16, right: 16, top: 12, bottom: 10 }).show(ui, |ui| {
+        card(ui, "Optimize", &format!("{done} of {} on", items.len()), |ui| {
+            Frame::new().inner_margin(Margin { left: 16, right: 16, top: 12, bottom: 12 }).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let left = items.iter().filter(|i| !i.0 && !matches!(i.3, Fix::Patch | Fix::Accounts)).count();
                     ui.vertical(|ui| {
-                        ui.set_width((ui.available_width() - 200.0).max(120.0));
+                        ui.set_width((ui.available_width() - 180.0).max(120.0));
                         ui.spacing_mut().item_spacing.y = 6.0;
-                        ui.label(small(if left == 0 { "Everything Potato can do for you is on".to_string() } else { format!("{} Potato can turn on for you", plural(left, "thing", "things")) }));
+                        ui.label(small(if done == items.len() { "Your PC is fully optimized" } else { "Turns on everything below in one click. You can turn any of them off again" }));
                         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 4.0), Sense::hover());
                         ui.painter().rect_filled(r, 2.0, LINE_HI);
-                        let share = ui.ctx().animate_value_with_time(egui::Id::unique("guide-done"), done as f32 / items.len() as f32, dur(0.4));
+                        let share = ui.ctx().animate_value_with_time(egui::Id::unique("optimized"), done as f32 / items.len() as f32, dur(0.4));
                         ui.painter().rect_filled(egui::Rect::from_min_size(r.min, vec2(r.width() * share, 4.0)), 2.0, GOOD);
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_enabled_ui(left > 0 && busy.is_none() && power.is_some(), |ui| {
-                            fix_all = primary(ui, "Turn On All Of These").on_hover_text("Everything here except the FPS caps and alts signing in together, which you pick yourself").clicked();
+                        ui.add_enabled_ui(done < items.len() && busy.is_none() && power.is_some(), |ui| {
+                            if primary(ui, "Optimize Now").clicked() {
+                                run = items.iter().filter(|i| !i.0).map(|i| (&i.3, true)).collect();
+                            }
                         });
                     });
                 });
             });
             let r = ui.min_rect();
             ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, LINE));
-            for (i, (ok, title, note, fix)) in items.iter().enumerate() {
-                let r = Frame::new().inner_margin(Margin::symmetric(16, 10)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        check(ui, *ok);
-                        ui.add_space(4.0);
-                        ui.vertical(|ui| {
-                            ui.set_max_width((ui.available_width() - 130.0).max(160.0));
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.label(RichText::new(*title).size(13.5).color(TEXT));
-                            ui.label(small(*note));
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let label = match fix {
-                                Fix::Accounts => "Accounts",
-                                Fix::Patch if *ok => return,
-                                Fix::Patch => "Turn On",
-                                _ if *ok => "Undo",
-                                _ => "Turn On",
-                            };
-                            let waiting = matches!(fix, Fix::Power(_)) && power.is_none();
-                            ui.add_enabled_ui(busy.is_none() && !waiting, |ui| {
-                                if action(ui, label, false).clicked() {
-                                    run.push((fix, !*ok));
-                                }
-                            });
-                        });
-                    });
+            for (i, (on, title, note, fix)) in items.iter().enumerate() {
+                let waiting = matches!(fix, Fix::Power(_)) && (power.is_none() || busy.is_some());
+                ui.add_enabled_ui(!waiting, |ui| {
+                    let mut v = *on;
+                    if switch_row(ui, title, note, i + 1 == items.len(), &mut v) {
+                        run.push((fix, v));
+                    }
                 });
-                if i + 1 < items.len() {
-                    let rect = r.response.rect;
-                    ui.painter().hline(rect.x_range().shrink(16.0), rect.bottom(), Stroke::new(1.0, LINE));
-                }
             }
         });
-        if fix_all {
-            run = items.iter().filter(|i| !i.0 && !matches!(i.3, Fix::Patch | Fix::Accounts)).map(|i| (&i.3, true)).collect();
-        }
         let power_items: Vec<(Item, bool)> = run.iter().filter_map(|(f, on)| if let Fix::Power(it) = f { Some((*it, *on)) } else { None }).collect();
         for (f, on) in &run {
             match f {
                 Fix::Trim => e.config.trim_minutes = if *on { 5 } else { 0 },
                 Fix::HelperCores => e.config.helper_cores = if *on { 2.min(cores.saturating_sub(2)) } else { 0 },
-                Fix::Patch => self.page = Page::RemoteDesktop,
-                Fix::Accounts => self.page = Page::Accounts,
                 Fix::Power(_) => {}
             }
         }
         if !power_items.is_empty() {
             self.apply_power(ui.ctx(), power_items);
         }
-        card(ui, "Windows Updates", "", |ui| self.updates_row(ui, e, true));
+        self.windows_card(ui, e);
 
         let trim_note = match e.last_trim_freed {
             Some(f) => {
                 let ago = match e.last_trim.elapsed().as_secs() / 60 { 0 => "just now".to_string(), 1 => "a minute ago".into(), m => format!("{m} min ago") };
                 if f == 0 { format!("Last ran {ago}: Roblox had nothing to free") } else { format!("Last ran {ago} and freed {}. Roblox takes some back as it plays", gb(f)) }
             }
-            None => "Moves RAM Roblox isn't using out of the way".into(),
+            None => "Frees the RAM Roblox isn't using right now".into(),
         };
         let off_or = |n: u32, f: &dyn Fn(u32) -> String| if n == 0 { "Off".to_string() } else { f(n) };
         let c = &mut e.config;
@@ -950,7 +945,7 @@ impl App {
             card(col(cols, 0), "RAM", "", |ui| {
                 let list = [0, 1, 2, 5, 10, 15, 30].map(|n| (n, off_or(n, &|n| format!("Every {n} Min"))));
                 row(ui, "Free Roblox RAM", &trim_note, false, |ui, id| { dropdown(ui, "trim", id, &mut c.trim_minutes, &list); });
-                row(ui, "Free PC RAM When It's This Full", "Clears the files Windows keeps in RAM. Empty for never", true, |ui, id| {
+                row(ui, "Free PC RAM When It's This Full", "Clears files Windows keeps in RAM just in case. Empty for never", true, |ui, id| {
                     ui.label(RichText::new("%").color(FAINT));
                     let mut text = if c.clean_above == 0 { String::new() } else { c.clean_above.to_string() };
                     if ui.add(egui::TextEdit::singleline(&mut text).desired_width(72.0).hint_text("Never").align(egui::Align2::CENTER_CENTER)).labelled_by(id).changed() {
@@ -968,7 +963,7 @@ impl App {
                 let list: Vec<(u32, String)> = [0, 1, 2, 3, 4, 6, 8].into_iter().filter(|n| *n <= cores).map(|n| (n, off_or(n, &|n| format!("{n} Each")))).collect();
                 row(ui, "Cores For Each Roblox", "Each Roblox gets cores of its own, so they don't fight over them", false, |ui, id| { dropdown(ui, "cores", id, &mut c.cores_per_client, &list); });
                 let list: Vec<(u32, String)> = [0, 2, 3].into_iter().filter(|n| *n < cores).map(|n| (n, off_or(n, &|n| format!("Last {n} Cores")))).collect();
-                row(ui, "Cores For Remote Desktop And Macros", "Remote Desktop and AutoHotkey run here, and Roblox stays off them", true,
+                row(ui, "Cores For RDPs And Macros", "RDPs and AutoHotkey run here, and Roblox stays off them", true,
                     |ui, id| { dropdown(ui, "helper-cores", id, &mut c.helper_cores, &list); });
             });
             card(col(cols, 1), "Restarts", "", |ui| {
@@ -997,15 +992,51 @@ impl App {
         });
     }
 
-    /// Notifications, the Discord report, Windows' own tools and Potato itself.
-    fn settings_page(&mut self, ui: &mut Ui, e: &mut Engine) {
+    /// Stopping updates and Windows' own clean-up tools, in one card.
+    fn windows_card(&mut self, ui: &mut Ui, e: &mut Engine) {
         let busy = *self.busy.lock().unwrap();
-        let (mut test, mut point, mut debloat, mut shutup, mut restore) = (false, false, false, false, false);
+        let (mut point, mut debloat, mut shutup) = (false, false, false);
         let armed = self.confirm_debloat.is_some_and(|t| t.elapsed() < Duration::from_secs(4));
+        card(ui, "Windows", "", |ui| {
+            self.updates_row(ui, e, false);
+            row(ui, "Make A Restore Point", "Lets you undo the two tools below with System Restore. Windows makes one a day at most", false, |ui, id| {
+                ui.add_enabled_ui(busy.is_none(), |ui| point = action(ui, if busy == Some("point") { "Making" } else { "Make One" }, busy == Some("point")).labelled_by(id).clicked());
+            });
+            row(ui, "Remove Windows Bloat", "Opens Chris Titus Tech's tool. Picking the wrong things can break Windows Update or the Store", false, |ui, id| {
+                debloat = action(ui, if armed { "Click Again" } else { "Open" }, false).labelled_by(id).clicked();
+            });
+            row(ui, "Turn Off Windows Tracking", "Opens the O&O ShutUp10++ download. Some of its switches turn off Windows Update or Defender", true, |ui, id| {
+                shutup = action(ui, "Open", false).labelled_by(id).clicked();
+            });
+        });
+        if armed {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+        if point {
+            self.run_action("point", ui.ctx(), |e| e.restore_point());
+        }
+        if debloat {
+            self.confirm_debloat = if armed {
+                if !crate::system::console("irm https://christitus.com/win | iex") {
+                    e.note = "Couldn't Open The Windows Tool".into();
+                }
+                None
+            } else {
+                Some(Instant::now())
+            };
+        }
+        if shutup {
+            crate::system::launch("https://www.oo-software.com/en/shutup10");
+        }
+    }
+
+    /// Notifications, the Discord report and Potato itself.
+    fn settings_page(&mut self, ui: &mut Ui, e: &mut Engine) {
+        let (mut test, mut restore) = (false, false);
         let c = &mut e.config;
         let webhook_text = &mut self.webhook_text;
         columns(ui, |cols| {
-            card(col(cols, 0), "Notifications", "", |ui| {
+            card(col(cols, 1), "Notifications", "", |ui| {
                 switch_row(ui, "Tell Me When RAM Is Freed", "A Windows notification each time Potato frees RAM", true, &mut c.notify);
             });
             card(col(cols, 0), "Discord", "", |ui| {
@@ -1028,17 +1059,6 @@ impl App {
                     ui.add_enabled_ui(!c.discord.webhook.is_empty(), |ui| test = action(ui, "Send", false).labelled_by(id).clicked());
                 });
             });
-            card(col(cols, 1), "Windows Tools", "Make a restore point before using these", |ui| {
-                row(ui, "Make A Restore Point", "Lets you undo the two tools below with System Restore. Windows makes one a day at most", false, |ui, id| {
-                    ui.add_enabled_ui(busy.is_none(), |ui| point = action(ui, if busy == Some("point") { "Making" } else { "Make One" }, busy == Some("point")).labelled_by(id).clicked());
-                });
-                row(ui, "Remove Windows Bloat", "Opens Chris Titus Tech's tool. Picking the wrong things can break Windows Update or the Store", false, |ui, id| {
-                    debloat = action(ui, if armed { "Click Again" } else { "Open" }, false).labelled_by(id).clicked();
-                });
-                row(ui, "Turn Off Windows Tracking", "Opens the O&O ShutUp10++ download. Some of its switches turn off Windows Update or Defender", true, |ui, id| {
-                    shutup = action(ui, "Open", false).labelled_by(id).clicked();
-                });
-            });
             card(col(cols, 1), "Potato", "", |ui| {
                 row(ui, "Undo Everything Potato Changed", "Puts every Roblox file back the way it was and turns Potato off on every account", false, |ui, id| {
                     restore = action(ui, "Undo All", false).labelled_by(id).clicked();
@@ -1054,42 +1074,25 @@ impl App {
             e.send_report_now();
             e.note = "Sending An Update To Discord".into();
         }
-        if armed {
-            ui.ctx().request_repaint_after(Duration::from_millis(250));
-        }
-        if point {
-            self.run_action("point", ui.ctx(), |e| e.restore_point());
-        }
-        if debloat {
-            self.confirm_debloat = if armed {
-                if !crate::system::console("irm https://christitus.com/win | iex") {
-                    e.note = "Couldn't Open The Windows Tool".into();
-                }
-                None
-            } else {
-                Some(Instant::now())
-            };
-        }
-        if shutup {
-            crate::system::launch("https://www.oo-software.com/en/shutup10");
-        }
         if restore {
             e.restore();
             self.fps_text.clear();
         }
     }
 
-    /// Remote Desktop alts: how many this PC can run, signing in together, each alt, and adding new ones.
+    /// RDP alts: how many this PC can run, Multiple RDPs, each alt, and adding new ones.
     fn rdp_page(&mut self, ui: &mut Ui, e: &mut Engine) {
         let r = e.rdp.lock().unwrap().clone();
         let busy = r.busy;
-        let (mut patch, mut undo, mut add, mut open, mut show) = (false, false, false, None, None);
-        let (mut startup, mut shortcut, mut wide) = (None, None, None);
+        let (mut patch, mut undo, mut add, mut open, mut show, mut open_all, mut restart) = (false, false, false, None, None, false, false);
+        let (mut startup, mut shortcut, mut wide, mut remove) = (None, None, None, None);
+        let (mut change, mut expire, mut repair) = (None, false, false);
+        let armed = self.confirm_remove.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_secs(4)).map(|(n, _)| n.clone());
         let ram_gb = (e.memory.1 as f64 / (1u64 << 30) as f64 * 10.0).round() / 10.0;   // what Task Manager shows: 7.99 is 8.0 GB
         let (by_cpu, by_ram) = crate::rdp::capacity(e.physical_cores, e.cores, ram_gb);
         let can = by_cpu.min(by_ram);
         let open_now = self.wins.iter().filter(|w| matches!(w.kind, Kind::Rdp(_))).count();
-        card(ui, "How Many Alts This PC Can Run", "The RDP guide's test", |ui| {
+        card(ui, "How Many RDPs This PC Can Run", "Worked out from your CPU and RAM", |ui| {
             Frame::new().inner_margin(Margin::symmetric(16, 14)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(semi(&format!("About {can}"), 24.0).color(if can == 0 { BAD } else { TEXT }));
@@ -1100,25 +1103,36 @@ impl App {
                 bar(ui, ui.available_width(), if can == 0 { 1.0 } else { open_now as f32 / can as f32 });
                 ui.add_space(8.0);
                 let why = if by_ram <= by_cpu {
-                    format!("Your RAM is what limits you: {ram_gb:.0} GB, and each alt needs about 4 GB after Windows takes its share. Your CPU has room for {by_cpu}.")
+                    format!("Your RAM is the limit: you have {ram_gb:.0} GB, and each RDP needs about 4 GB once Windows has its share. Your CPU could run {by_cpu}.")
                 } else {
-                    format!("Your CPU is what limits you: {} cores and {} threads, about 2 threads for each alt. Your RAM has room for {by_ram}.", e.physical_cores, e.cores)
+                    format!("Your CPU is the limit: {} cores and {} threads, and each RDP needs about 2 threads. Your RAM could run {by_ram}.", e.physical_cores, e.cores)
                 };
                 ui.label(small(why));
                 if e.base_mhz > 0 {
                     let ghz = e.base_mhz as f32 / 1000.0;
-                    ui.label(small(if ghz >= 2.5 { format!("Your CPU runs at {ghz:.1} GHz, fast enough for the guide's numbers.") } else { format!("Your CPU runs at {ghz:.1} GHz, slower than the guide's 2.5 GHz, so expect fewer alts.") }));
+                    ui.label(small(if ghz >= 2.5 { format!("Your CPU runs at {ghz:.1} GHz, which is fast enough.") } else { format!("Your CPU runs at {ghz:.1} GHz. Under 2.5 GHz, expect fewer RDPs than this.") }));
                 }
             });
         });
-        card(ui, "Signing In", "", |ui| {
+        card(ui, "RDP Status", "What Windows says right now", |ui| {
+            let running = r.service == "Running";
+            row(ui, "Windows", &r.windows, false, |_, _| {});
+            row(ui, "RDP Service", if running { "" } else { "Alts can't connect while it's stopped. Restart it below" }, false, |ui, _| {
+                status(ui, if r.service.is_empty() { "Missing" } else { &r.service }, running);
+            });
+            row(ui, "Multiple RDPs", "", false, |ui, _| status(ui, match r.patch { Patch::Patched => "On", Patch::Unknown => "Checking", _ => "Off" }, r.patch == Patch::Patched));
+            row(ui, "Listening", if r.listening || r.port.is_empty() { "" } else { "Nothing can connect. Restarting the RDP service usually fixes it" }, true, |ui, _| {
+                status(ui, &if r.listening { format!("On Port {}", r.port) } else { "Not Listening".into() }, r.listening);
+            });
+        });
+        card(ui, "RDP Settings", "", |ui| {
             let (note, can_patch) = match r.patch {
-                Patch::Patched => ("On: all your alts can be signed in at once. Potato warns you if a Windows update turns it off", false),
-                Patch::Unpatched => ("Windows only lets one Remote Desktop sign in at a time. This changes one Windows file so all your alts can. Open alts disconnect for a second; Roblox keeps running", true),
-                Patch::Unsupported => ("Potato can't do this on your Windows version yet, so only one alt can be signed in at a time", false),
+                Patch::Patched => ("On. All your RDPs can be signed in at once. Potato warns you if a Windows update turns it off", false),
+                Patch::Unpatched => ("Windows only lets one RDP be signed in at a time. This lets all of them, and keeps working after Windows updates. Open RDPs disconnect for a second, and Roblox keeps running", true),
+                Patch::Unsupported => ("This only works on PCs with an Intel or AMD CPU, so only one RDP can be signed in at a time", false),
                 Patch::Unknown => ("Checking Windows", false),
             };
-            row(ui, "Let Alts Sign In Together", note, false, |ui, id| {
+            row(ui, "Allow Multiple RDPs", note, false, |ui, id| {
                 if can_patch {
                     ui.add_enabled_ui(busy.is_none(), |ui| patch = button(ui, if busy == Some("patch") { "Turning On" } else { "Turn On" }, busy == Some("patch"), true).labelled_by(id).clicked());
                 } else if r.patch == Patch::Patched && r.can_undo {
@@ -1126,15 +1140,62 @@ impl App {
                 }
             });
             self.updates_row(ui, e, false);
-            row(ui, "Max CPU For Each Remote Desktop", "Stops one Remote Desktop window from hogging the CPU. Too low and alts freeze or disconnect. Empty for no limit", true, |ui, id| {
+            row(ui, "Restart The RDP Service", "Fixes alts that won't connect or are stuck on a black screen. Open RDPs disconnect for a moment, and Roblox keeps running", false, |ui, id| {
+                ui.add_enabled_ui(busy.is_none(), |ui| restart = action(ui, if busy == Some("restart") { "Restarting" } else { "Restart" }, busy == Some("restart")).labelled_by(id).clicked());
+            });
+            row(ui, "Make Every Account Never Expire", "Windows locks local accounts out after 42 days unless they're set to never expire. Potato does this for alts already", false, |ui, id| {
+                ui.add_enabled_ui(busy.is_none(), |ui| expire = action(ui, if busy == Some("expire") { "Fixing" } else { "Fix" }, busy == Some("expire")).labelled_by(id).clicked());
+            });
+            if r.patch != Patch::Unknown && r.service.is_empty() {
+                row(ui, "Repair The RDP Service", "Windows' Remote Desktop service is missing, so no alt can connect. This puts it back", false, |ui, id| {
+                    ui.add_enabled_ui(busy.is_none(), |ui| repair = primary(ui, if busy == Some("repair") { "Repairing" } else { "Repair" }).labelled_by(id).clicked());
+                });
+            }
+            row(ui, "Max CPU For Each RDP", "Stops one RDP from hogging the CPU. Too low and alts freeze or disconnect. Empty for no limit", true, |ui, id| {
                 number_box(ui, id, &mut e.config.rdp_cpu_limit, 100, "%", "None");
             });
         });
-        card(ui, "Your Alts", "Each opens with no sound, no drives and no wallpaper, and Windows keys stay on this PC", |ui| {
+        card(ui, "Lag And Picture", "For every RDP on this PC. Reconnect your RDPs after a change", |ui| {
+            ui.add_enabled_ui(busy.is_none(), |ui| {
+                let mut tcp = r.tcp_only;
+                if switch_row(ui, "Use TCP Instead Of UDP", "Fixes RDPs that freeze, lag or go black for a few seconds", false, &mut tcp) {
+                    change = Some((crate::rdp::Setting::TcpOnly, tcp.then_some(1)));
+                }
+                let mut fps = r.fps60;
+                if switch_row(ui, "60 FPS In RDPs", "Windows caps RDPs at 30 FPS. 60 looks smoother but uses more CPU. Restart the PC to use it", false, &mut fps) {
+                    change = Some((crate::rdp::Setting::Fps60, fps.then_some(15)));
+                }
+                row(ui, "Picture Quality", "Lower uses less CPU for every RDP", false, |ui, id| {
+                    let mut q = r.quality;
+                    let options = [(None, "Windows Default".to_string()), (Some(4), "Low".into()), (Some(3), "Medium".into()), (Some(2), "High".into()), (Some(1), "Lossless".into())];
+                    if dropdown(ui, "rdp-quality", id, &mut q, &options) {
+                        change = Some((crate::rdp::Setting::Quality, q));
+                    }
+                });
+                row(ui, "Compression", "Your RDPs never leave this PC, so Off saves CPU and loses nothing", false, |ui, id| {
+                    let mut c = r.compression;
+                    let options = [(None, "Windows Default".to_string()), (Some(0), "Off".into()), (Some(1), "Less Memory".into()), (Some(2), "Balanced".into()), (Some(3), "Less Bandwidth".into())];
+                    if dropdown(ui, "rdp-compression", id, &mut c, &options) {
+                        change = Some((crate::rdp::Setting::Compression, c));
+                    }
+                });
+                let mut hide = r.hide_alts;
+                if switch_row(ui, "Hide Alts On The Sign-In Screen", "Your alts stop showing when Windows starts. They still open in RDP, and you're never hidden", true, &mut hide) {
+                    change = Some((crate::rdp::Setting::HideAlts, hide.then_some(0)));
+                }
+            });
+        });
+        card(ui, "Your Alts", "Each RDP opens with no sound, no drives and no wallpaper, and Windows keys stay on this PC", |ui| {
             if r.accounts.is_empty() {
                 Frame::new().inner_margin(Margin::same(20)).show(ui, |ui| { ui.label(small("No alts yet. Add one below.")); });
             }
             let n = r.accounts.len();
+            let closed = r.accounts.iter().filter(|a| !self.wins.iter().any(|w| w.kind == Kind::Rdp((*a).clone()))).count();
+            if n > 1 {
+                row(ui, "Open Every Alt", &if closed == 0 { "They're all open".to_string() } else { format!("Opens the {} not open yet", plural(closed, "alt", "alts")) }, false, |ui, id| {
+                    ui.add_enabled_ui(closed > 0, |ui| open_all = primary(ui, "Open All").labelled_by(id).clicked());
+                });
+            }
             for (i, name) in r.accounts.iter().enumerate() {
                 let win = self.wins.iter().find(|w| w.kind == Kind::Rdp(name.clone())).map(|w| w.hwnd);
                 let is_wide = e.config.rdp_wide.contains(name);
@@ -1152,9 +1213,16 @@ impl App {
                         }).inner;
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             match win {
-                                Some(h) => if action(ui, "Show", false).labelled_by(id).on_hover_text("Brings this alt's window to the front").clicked() { show = Some(h); },
+                                Some(h) => if action(ui, "Show", false).labelled_by(id).on_hover_text("Goes to this alt's window").clicked() { show = Some(h); },
                                 None => if primary(ui, "Open").labelled_by(id).clicked() { open = Some(name.clone()); },
                             }
+                            let sure = armed.as_deref() == Some(name.as_str());
+                            ui.add_enabled_ui(busy.is_none(), |ui| {
+                                if action(ui, if sure { "Click Again To Remove" } else if busy == Some("remove") { "Removing" } else { "Remove" }, false)
+                                    .on_hover_text("Signs the alt out and deletes its Windows account and files, Roblox in it too").clicked() {
+                                    remove = Some(name.clone());
+                                }
+                            });
                             if action(ui, "Desktop Shortcut", false).on_hover_text("Puts a shortcut on your desktop that opens this alt with these settings, even without Potato").clicked() {
                                 shortcut = Some(name.clone());
                             }
@@ -1182,7 +1250,7 @@ impl App {
             }
         });
         let ok_name = crate::rdp::valid_name(&self.new_name);
-        card(ui, "Add An Alt", "Makes a Windows account for an alt. Already have one? Type its name and password so Potato can sign in for you", |ui| {
+        card(ui, "Add An Alt", "Makes a Windows account for an alt, or type an existing one's name and password", |ui| {
             Frame::new().inner_margin(Margin::symmetric(16, 14)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     let name_id = ui.label(RichText::new("Name").size(13.0).color(FAINT)).id;
@@ -1201,6 +1269,19 @@ impl App {
         });
         if patch {
             engine::refresh_rdp(e.rdp.clone(), Some("patch"), crate::rdp::patch);
+        }
+        if restart {
+            engine::refresh_rdp(e.rdp.clone(), Some("restart"), crate::rdp::restart_service);
+        }
+        if let Some((setting, value)) = change {
+            let alts = r.accounts.clone();
+            engine::refresh_rdp(e.rdp.clone(), Some("setting"), move || crate::rdp::set(setting, value, &alts));
+        }
+        if expire {
+            engine::refresh_rdp(e.rdp.clone(), Some("expire"), crate::rdp::never_expire);
+        }
+        if repair {
+            engine::refresh_rdp(e.rdp.clone(), Some("repair"), crate::rdp::repair_service);
         }
         if undo {
             e.config.rdp_patched = false;   // you turned it off, not Windows: no warning
@@ -1233,8 +1314,29 @@ impl App {
                 e.note = "Couldn't Set It To Open When You Sign In".into();
             }
         }
+        if armed.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+        if let Some(name) = remove {
+            if armed.as_deref() == Some(name.as_str()) {
+                self.confirm_remove = None;
+                e.config.rdp_startup.retain(|n| *n != name);
+                e.config.rdp_wide.retain(|n| *n != name);
+                crate::rdp::save_startup(!e.config.rdp_startup.is_empty());
+                engine::refresh_rdp(e.rdp.clone(), Some("remove"), move || crate::rdp::remove_account(&name));
+            } else {
+                self.confirm_remove = Some((name, Instant::now()));
+            }
+        }
         if let Some(h) = show {
             crate::preview::focus(h);
+        }
+        if open_all {
+            for name in r.accounts.iter().filter(|a| !self.wins.iter().any(|w| w.kind == Kind::Rdp((*a).clone()))) {
+                if let Err(m) = crate::rdp::open(name, e.config.rdp_wide.contains(name)) {
+                    e.note = m;
+                }
+            }
         }
         if let Some(name) = open && let Err(m) = crate::rdp::open(&name, e.config.rdp_wide.contains(&name)) {
             e.note = m;

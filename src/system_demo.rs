@@ -149,7 +149,7 @@ pub fn memory() -> (u64, u64) {
 }
 
 pub fn powershell(_: &str, _: &[(&str, &str)]) -> Result<String, String> {
-    Ok("Alt1\nAlt2".into())
+    Ok("WINDOWS=22H2, build 19045.6466\nSERVICE=Running\nPORT=3389\nLISTENING=True\nTCPONLY=True\nFPS60=False\nHIDEALTS=False\nQUALITY=4\nCOMPRESSION=\nSERVICEDLL=%SystemRoot%\\System32\\termsrv.dll\nAlt1\nAlt2".into())
 }
 
 pub fn save_rdp_login(_: &str, _: &str, _: &str) -> bool {

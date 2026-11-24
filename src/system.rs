@@ -491,6 +491,8 @@ impl WideZ for std::ffi::OsStr {
 /// line. The script goes in base64 so its quotes reach PowerShell as written. Ok(output), or Err(its first error).
 pub fn powershell(script: &str, env: &[(&str, &str)]) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
+    // progress bars (Expand-Archive, Unregister-ScheduledTask...) fail with no console window, and take the script down
+    let script = format!("$ProgressPreference = 'SilentlyContinue'\n{script}");
     let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &crate::rdp::base64(&utf16)])

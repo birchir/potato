@@ -795,9 +795,14 @@ pub fn refresh_rdp(rdp: Arc<Mutex<crate::rdp::Rdp>>, busy: Option<&'static str>,
         fresh.msg = match done {
             Err(e) => Some(e),
             Ok(()) => busy.map(|b| match b {
-                "patch" => "Every Account Can Be On At Once Now",
-                "undo" => "Put Windows' Own File Back",
-                "add" => "Account Ready: Click Open",
+                "patch" => "Multiple RDPs Is On",
+                "undo" => "Multiple RDPs Is Off",
+                "add" => "Alt Ready: Click Open",
+                "restart" => "Restarted The RDP Service",
+                "remove" => "Removed The Alt",
+                "setting" => "Changed. Reconnect Your RDPs To Use It",
+                "expire" => "Every Account Now Never Expires",
+                "repair" => "Repaired The RDP Service",
                 _ => "Done",
             }.to_string()).or(r.msg.take()),
         };

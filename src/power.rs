@@ -10,6 +10,7 @@ pub struct State {
     pub boost_off: bool,
     pub fast_startup_off: bool,
     pub updates_off: bool,
+    pub smooth_rdp: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,6 +19,7 @@ pub enum Item {
     BoostOff,
     FastStartupOff,
     UpdatesOff,
+    SmoothRdp,
 }
 
 impl Item {
@@ -27,6 +29,7 @@ impl Item {
             Item::BoostOff => s.boost_off,
             Item::FastStartupOff => s.fast_startup_off,
             Item::UpdatesOff => s.updates_off,
+            Item::SmoothRdp => s.smooth_rdp,
         }
     }
 }
@@ -49,6 +52,11 @@ pub fn is_high_performance(active: &str) -> bool {
 pub fn boost_is_off(qh: &str) -> Option<bool> {
     let hex = qh.lines().find_map(|l| l.split("0x").nth(1))?.trim();
     u32::from_str_radix(hex.get(..8).unwrap_or(hex), 16).ok().map(|v| v == 0)
+}
+
+/// A DWORD from `reg query KEY /v NAME` ("    Name    REG_DWORD    0x2"), or None when it isn't set.
+pub fn reg_dword(query: &str) -> Option<u32> {
+    query.lines().find(|l| l.contains("REG_DWORD")).and_then(|l| l.split("0x").nth(1)).and_then(|h| u32::from_str_radix(h.trim(), 16).ok())
 }
 
 /// `reg query ...\Services\wuauserv /v Start`: 4 is Disabled.
@@ -77,7 +85,23 @@ mod imp {
             boost_off: boost_is_off(&out("powercfg", &["/qh", "SCHEME_CURRENT", "SUB_PROCESSOR", "PERFBOOSTMODE"])).unwrap_or(false),
             fast_startup_off: fast.is_ok_and(|v| v.trim() == "0"),
             updates_off: updates_off(),
+            smooth_rdp: [(TS, "ImageQuality", 3), (TS, "MaxCompressionLevel", 2), (TS_CLIENT, "fClientDisableUDP", 1)]
+                .iter().all(|(k, v, want)| reg_dword(&out("reg", &["query", k, "/v", v])) == Some(*want)),
         }
+    }
+
+    /// Remote Desktop's own policies (what Group Policy's Remote Desktop Services pages set)
+    const TS: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services";
+    const TS_CLIENT: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services\Client";
+
+    /// The usual fix for laggy RDPs on one PC: medium picture quality (3, not 2: 2 is High in TerminalServer.admx),
+    /// balanced compression, and TCP only (UDP stutters on a connection to itself). The RDPs page's Lag And Picture
+    /// card sets the same values one by one; `rdp::writes` is where they live. Undo clears them.
+    fn set_smooth_rdp(on: bool) -> bool {
+        let _ = system::run("reg", &["delete", TS, "/v", "SelectNetworkDetect", "/f"]);
+        use crate::rdp::{Setting, set};
+        [(Setting::TcpOnly, 1), (Setting::Quality, 3), (Setting::Compression, 2)].iter()
+            .all(|(s, v)| set(*s, on.then_some(*v), &[]).is_ok())
     }
 
     const WU: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\wuauserv";
@@ -129,6 +153,7 @@ if ($LASTEXITCODE -ne 0) {
             Item::FastStartupOff => system::run("reg", &["add", r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power", "/v", "HiberbootEnabled",
                                                       "/t", "REG_DWORD", "/d", if on { "0" } else { "1" }, "/f"]),
             Item::UpdatesOff => set_updates(on),
+            Item::SmoothRdp => set_smooth_rdp(on),
         };
         if ok { Ok(()) } else { Err("Windows Didn't Take The Change".into()) }
     }
@@ -138,7 +163,7 @@ if ($LASTEXITCODE -ne 0) {
 #[cfg(not(windows))]
 mod imp {
     use super::*;
-    static NOW: std::sync::Mutex<State> = std::sync::Mutex::new(State { high_performance: false, boost_off: false, fast_startup_off: false, updates_off: false });
+    static NOW: std::sync::Mutex<State> = std::sync::Mutex::new(State { high_performance: false, boost_off: false, fast_startup_off: false, updates_off: false, smooth_rdp: false });
 
     pub fn read() -> State {
         *NOW.lock().unwrap()
@@ -155,6 +180,7 @@ mod imp {
             Item::BoostOff => s.boost_off = on,
             Item::FastStartupOff => s.fast_startup_off = on,
             Item::UpdatesOff => s.updates_off = on,
+            Item::SmoothRdp => s.smooth_rdp = on,
         }
         Ok(())
     }
@@ -180,5 +206,7 @@ mod tests {
         assert!(updates_are_off(wu));
         assert!(!updates_are_off(&wu.replace("0x4", "0x3")));
         assert!(!updates_are_off(""));
+        assert_eq!(reg_dword("\r\nHKEY_LOCAL_MACHINE\\...\r\n    ImageQuality    REG_DWORD    0x2\r\n"), Some(2));
+        assert_eq!(reg_dword("ERROR: The system was unable to find the specified registry key or value."), None);
     }
 }
