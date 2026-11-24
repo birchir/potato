@@ -15,7 +15,7 @@ use crate::engine::Engine;
 /// Keep the returned icon alive for as long as Potato runs; dropping it removes it from the tray.
 pub fn create(hwnd: isize, ctx: egui::Context, engine: Arc<Mutex<Engine>>) -> Option<TrayIcon> {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok()?;
-    let (open, trim, quit) = (MenuItem::new("Open Potato", true, None), MenuItem::new("Trim All Roblox", true, None), MenuItem::new("Quit Potato", true, None));
+    let (open, trim, quit) = (MenuItem::new("Open Potato", true, None), MenuItem::new("Free Roblox RAM", true, None), MenuItem::new("Quit Potato", true, None));
     let menu = Menu::new();
     menu.append_items(&[&open, &trim, &quit]).ok()?;
     let tray = TrayIconBuilder::new().with_tooltip("Potato").with_menu(Box::new(menu)).with_menu_on_left_click(false)

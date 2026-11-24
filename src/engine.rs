@@ -211,6 +211,10 @@ impl Engine {
         if self.last_rdp_check.is_none_or(|t| t.elapsed() >= RDP_EVERY) {
             self.last_rdp_check = Some(Instant::now());
             refresh_rdp(self.rdp.clone(), None, || Ok(()));
+            if self.config.block_updates {
+                // Windows' Update Medic turns the update service back on by itself: turn it off again
+                std::thread::spawn(|| if !crate::power::updates_off() { let _ = crate::power::apply(crate::power::Item::UpdatesOff, true); });
+            }
         }
         self.watch_rdp();
         if self.last_tick.is_some_and(|t| t.elapsed() < TICK) {
@@ -298,7 +302,7 @@ impl Engine {
         }
         self.closed_by_us.extend(extra.iter().copied());
         let n = extra.iter().filter(|pid| system::close(**pid)).count();
-        self.note = format!("Closed {n} Extra {}", if n == 1 { "Client" } else { "Clients" });
+        self.note = format!("Closed {n} Extra Roblox");
         self.clients.retain(|c| !extra.contains(&c.pid));
     }
 
@@ -413,7 +417,7 @@ impl Engine {
         for (sid, server) in due {
             if self.send_rejoins(&[(sid.as_str(), vec![server])]) > 0 {
                 *self.restarts.entry(sid).or_default() += 1;
-                self.note = "Rejoined A Crashed Client".into();
+                self.note = "Reopened A Roblox That Crashed".into();
             }
         }
     }
@@ -441,7 +445,7 @@ impl Engine {
             script += &format!("; New-NetQosPolicy -Name Potato -PolicyStore ActiveStore -AppPathNameMatchCondition RobloxPlayerBeta.exe -ThrottleRateActionBitsPerSecond {}", want as u64 * 1000);
         }
         if !system::run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]) && want > 0 {
-            self.note = "Couldn't Set The Upload Cap".into();
+            self.note = "Couldn't Limit Roblox's Upload Speed".into();
         }
     }
 
@@ -554,7 +558,7 @@ impl Engine {
             self.helper_installed = Some(wanted);
             if wanted {
                 if !helper::install() {
-                    self.note = "Couldn't Set Up Open Maximized For Remote Desktop Accounts".into();
+                    self.note = "Couldn't Open Alts Maximized".into();
                 }
             } else {
                 helper::uninstall();
@@ -565,7 +569,7 @@ impl Engine {
     /// `say` also shows the result in the window; the Windows notification goes out either way (if it's on).
     pub fn trim_all(&mut self, say: bool) {
         let (n, freed) = self.trim_clients();
-        self.tell(say, freed, format!("Trimmed {n} {}, Freed {}", if n == 1 { "Client" } else { "Clients" }, gb(freed)));
+        self.tell(say, freed, format!("Freed {} From {n} Roblox", gb(freed)));
     }
 
     fn trim_clients(&mut self) -> (usize, u64) {
@@ -578,7 +582,7 @@ impl Engine {
     /// Trim the clients running as one Windows user (a tile on the Overview).
     pub fn trim_user(&mut self, user: &str) {
         let (_, freed) = self.trim_where(|c| c.user.eq_ignore_ascii_case(user));
-        self.tell(true, freed.max(1), format!("Trimmed {user}, Freed {}", gb(freed)));
+        self.tell(true, freed.max(1), format!("Freed {} From {user}", gb(freed)));
     }
 
     fn trim_where(&mut self, pick: impl Fn(&Client) -> bool) -> (usize, u64) {
@@ -597,7 +601,7 @@ impl Engine {
         self.trim_clients();
         self.memory = system::memory();
         let freed = before.saturating_sub(self.memory.0);
-        self.tell(say, if ok { freed } else { 1 }, if ok { format!("Cleaned Memory, Freed {}", gb(freed)) } else { "Couldn't Clean Memory".into() });
+        self.tell(say, if ok { freed } else { 1 }, if ok { format!("Freed {} Of PC RAM", gb(freed)) } else { "Couldn't Free PC RAM".into() });
     }
 
     /// Nothing freed: no notification, so a timer trim of idle clients doesn't pop one up.
@@ -642,7 +646,7 @@ impl Engine {
         }
         let list: Vec<(&str, Vec<rejoin::Server>)> = servers.into_iter().collect();
         if self.send_rejoins(&list) < list.len() {
-            self.note = "Couldn't Hand Every Restart To Its Account".into();
+            self.note = "Couldn't Restart Every Roblox".into();
             return;
         }
         for (sid, l) in &list {
@@ -650,8 +654,12 @@ impl Engine {
         }
         self.closed_by_us.extend(close.iter().copied());
         let closed = close.iter().filter(|pid| system::close(**pid)).count();
-        self.note = format!("Restarting {closed} {}{}", if closed == 1 { "Client" } else { "Clients" },
-            if unknown > 0 { format!(". Couldn't Find The Server For {unknown}, Left Those Open") } else { String::new() });
+        self.note = match (closed, unknown) {
+            (0, 0) => "No Roblox To Restart".into(),
+            (0, _) => "Nothing Restarted: Couldn't Tell Which Server Roblox Was In".into(),
+            (n, 0) => format!("Restarting {n} Roblox"),
+            (n, u) => format!("Restarting {n} Roblox. Left {u} Open: Couldn't Tell Which Server They Were In"),
+        };
         self.last_tick = None;
     }
 
@@ -690,7 +698,7 @@ impl Engine {
         }
         n += files::restore(&files::shared_flag_files()).unwrap_or(0);
         self.changed();
-        self.note = format!("Restored {n} Files. Switch an account back on to use Potato again.");
+        self.note = format!("Put Back {n} Roblox Files. Turn An Account Back On To Use Potato Again");
     }
 }
 
@@ -718,11 +726,12 @@ fn check_for_update(update: Update) {
 pub fn install_update(_: Release, _: Update) {}
 
 /// GET a URL with curl (it ships with Windows 10 and 11), following GitHub's download redirects.
-#[cfg(windows)]
-fn fetch(url: &str, seconds: u32) -> Option<Vec<u8>> {
-    use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("curl").args(["-sfL", "-m", &seconds.to_string(), "-H", "User-Agent: Potato", url])
-        .creation_flags(0x0800_0000).output().ok()?;
+pub fn fetch(url: &str, seconds: u32) -> Option<Vec<u8>> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-sfL", "-m", &seconds.to_string(), "-H", "User-Agent: Potato", url]);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
+    let out = cmd.output().ok()?;
     out.status.success().then_some(out.stdout)
 }
 

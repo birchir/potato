@@ -23,6 +23,7 @@ pub mod report;
 pub mod card;
 pub mod rdp;
 pub mod power;
+pub mod avatars;
 pub mod preview_shared;
 #[cfg(windows)]
 pub mod preview;

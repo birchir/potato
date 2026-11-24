@@ -1,5 +1,7 @@
 //! The look of the window: colors, type, icons and the controls every page is built from. Pages (app.rs) only
-//! arrange these, so the look changes here in one place.
+//! arrange these, so the look changes here in one place. Quiet and dense like Linear: near-black greys in a few
+//! steps, thin lines instead of boxes in boxes, white for the one thing to press, and green only for "running"
+//! or "done".
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,19 +9,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, Frame, Margin, Pos2, RichText, Sense, Stroke, Ui, vec2};
 
-pub const BG: Color32 = Color32::from_rgb(9, 9, 11);
-pub const RAIL: Color32 = Color32::from_rgb(0, 0, 0);
-pub const CARD: Color32 = Color32::from_rgb(19, 19, 22);
-pub const CARD_HI: Color32 = Color32::from_rgb(30, 30, 35);
-pub const LINE: Color32 = Color32::from_rgb(38, 38, 44);
-pub const TEXT: Color32 = Color32::from_rgb(242, 242, 244);
-pub const DIM: Color32 = Color32::from_rgb(180, 180, 186);
-pub const FAINT: Color32 = Color32::from_rgb(142, 142, 150);   // 5.6:1 on CARD
-pub const OFF: Color32 = Color32::from_rgb(64, 64, 70);
-pub const GOOD: Color32 = Color32::from_rgb(74, 222, 128);
-pub const BAD: Color32 = Color32::from_rgb(248, 113, 113);
-/// potato gold: the one color that means "Potato", used sparingly (the chosen page, Roblox in the chart)
-pub const ACCENT: Color32 = Color32::from_rgb(240, 182, 82);
+/// behind everything: the sidebar sits straight on it
+pub const CANVAS: Color32 = Color32::from_rgb(8, 9, 10);
+/// the page, one step up, in a rounded panel
+pub const PANEL: Color32 = Color32::from_rgb(15, 16, 17);
+/// a group of rows on the page
+pub const CARD: Color32 = Color32::from_rgb(20, 21, 23);
+/// hovered rows, the chosen page, secondary buttons
+pub const CARD_HI: Color32 = Color32::from_rgb(28, 29, 32);
+pub const LINE: Color32 = Color32::from_rgb(35, 36, 40);
+pub const LINE_HI: Color32 = Color32::from_rgb(52, 53, 58);
+pub const TEXT: Color32 = Color32::from_rgb(238, 238, 240);
+pub const DIM: Color32 = Color32::from_rgb(178, 179, 184);
+pub const FAINT: Color32 = Color32::from_rgb(138, 139, 145);   // 5.6:1 on CARD
+pub const OFF: Color32 = Color32::from_rgb(70, 71, 77);
+pub const GOOD: Color32 = Color32::from_rgb(76, 183, 130);
+pub const BAD: Color32 = Color32::from_rgb(235, 87, 87);
 
 /// Windows' "Animation effects" setting: off turns every animation here off (reduced motion).
 pub static MOTION: AtomicBool = AtomicBool::new(true);
@@ -43,11 +48,15 @@ pub fn logo(ui: &mut Ui, px: f32) {
     let colors: HashMap<char, Color32> = lines.iter().filter(|l| l.get(1..2) == Some("="))
         .filter_map(|l| Some((l.chars().next()?, Color32::from_hex(l.get(2..9)?).ok()?))).collect();
     let rows: Vec<&str> = lines.into_iter().filter(|l| l.get(1..2) != Some("=")).collect();
+    // pixel art stays sharp only on whole screen pixels: snap the size and corner to them
+    let ppp = ui.ctx().pixels_per_point();
+    let px = (px * ppp).round().max(1.0) / ppp;
     let (rect, _) = ui.allocate_exact_size(vec2(rows[0].len() as f32 * px, rows.len() as f32 * px), Sense::hover());
+    let origin = (rect.min.to_vec2() * ppp).round() / ppp;
     for (y, row) in rows.iter().enumerate() {
         for (x, k) in row.chars().enumerate() {
             let Some(&color) = colors.get(&k) else { continue };
-            let min = rect.min + vec2(x as f32 * px, y as f32 * px);
+            let min = origin.to_pos2() + vec2(x as f32 * px, y as f32 * px);
             ui.painter().rect_filled(egui::Rect::from_min_size(min, vec2(px, px)), 0.0, color);
         }
     }
@@ -64,92 +73,115 @@ pub enum Icon {
 
 /// Simple line icons, drawn so they stay sharp at any scale.
 pub fn icon(p: &egui::Painter, kind: Icon, c: Pos2, s: f32, color: Color32) {
-    let st = Stroke::new(1.7, color);
+    let st = Stroke::new(1.4, color);
     match kind {
         Icon::Grid => {
-            let q = s * 0.38;
+            let q = s * 0.36;
             for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-                let center = c + vec2(dx * (q / 2.0 + 1.5), dy * (q / 2.0 + 1.5));
-                p.rect_stroke(egui::Rect::from_center_size(center, vec2(q, q)), 2.5, st, egui::StrokeKind::Middle);
+                let center = c + vec2(dx * (q / 2.0 + 1.2), dy * (q / 2.0 + 1.2));
+                p.rect_stroke(egui::Rect::from_center_size(center, vec2(q, q)), 1.5, st, egui::StrokeKind::Middle);
             }
         }
         Icon::People => {
-            p.circle_stroke(c + vec2(0.0, -s * 0.18), s * 0.17, st);
+            p.circle_stroke(c + vec2(0.0, -s * 0.18), s * 0.18, st);
             let arc: Vec<Pos2> = (0..=16).map(|i| {
                 let a = std::f32::consts::PI * (1.0 + i as f32 / 16.0);
-                c + vec2(a.cos() * s * 0.34, s * 0.38 + a.sin() * s * 0.3)
+                c + vec2(a.cos() * s * 0.36, s * 0.42 + a.sin() * s * 0.32)
             }).collect();
             p.add(egui::Shape::line(arc, st));
         }
         Icon::Monitor => {
-            let r = egui::Rect::from_center_size(c + vec2(0.0, -s * 0.08), vec2(s * 0.86, s * 0.56));
-            p.rect_stroke(r, 3.0, st, egui::StrokeKind::Middle);
-            p.line_segment([c + vec2(0.0, s * 0.2), c + vec2(0.0, s * 0.34)], st);
-            p.line_segment([c + vec2(-s * 0.2, s * 0.36), c + vec2(s * 0.2, s * 0.36)], st);
+            let r = egui::Rect::from_center_size(c + vec2(0.0, -s * 0.08), vec2(s * 0.9, s * 0.6));
+            p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
+            p.line_segment([c + vec2(-s * 0.2, s * 0.4), c + vec2(s * 0.2, s * 0.4)], st);
         }
         Icon::Bolt => {
-            let pts = [(0.08, -0.42), (-0.24, 0.06), (0.0, 0.06), (-0.08, 0.42), (0.24, -0.08), (0.0, -0.08)]
+            let pts = [(0.1, -0.45), (-0.26, 0.06), (0.0, 0.06), (-0.1, 0.45), (0.26, -0.08), (0.0, -0.08)]
                 .map(|(x, y)| c + vec2(x * s, y * s));
             p.add(egui::Shape::closed_line(pts.to_vec(), st));
         }
         Icon::Sliders => {
-            for (i, k) in [0.25_f32, 0.7, 0.4].into_iter().enumerate() {
-                let y = c.y + (i as f32 - 1.0) * s * 0.28;
-                p.line_segment([egui::pos2(c.x - s * 0.38, y), egui::pos2(c.x + s * 0.38, y)], st);
-                p.circle_filled(egui::pos2(c.x - s * 0.38 + k * s * 0.76, y), 3.2, color);
+            for (i, k) in [0.3_f32, 0.72, 0.42].into_iter().enumerate() {
+                let y = c.y + (i as f32 - 1.0) * s * 0.3;
+                p.line_segment([egui::pos2(c.x - s * 0.42, y), egui::pos2(c.x + s * 0.42, y)], st);
+                p.circle_filled(egui::pos2(c.x - s * 0.42 + k * s * 0.84, y), 2.4, color);
             }
         }
     }
 }
 
-/// A page in the left rail: icon over its name, the whole block one big target (Fitts's law).
-pub fn rail_item(ui: &mut Ui, kind: Icon, name: &str, picked: bool, alert: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 62.0), Sense::click());
-    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered() || picked, dur(0.12));
+/// A full-width sidebar row that lights up on hover and stays lit while chosen. The whole row is the target
+/// (Fitts's law). `draw` paints its contents into the row's rect with the ink color to use.
+fn side_row(ui: &mut Ui, name: &str, picked: bool, draw: impl FnOnce(&egui::Painter, egui::Rect, Color32)) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), dur(0.1));
     let p = ui.painter();
-    if hover > 0.0 {
-        p.rect_filled(rect.shrink2(vec2(8.0, 2.0)), 12.0, if picked { CARD_HI } else { CARD.gamma_multiply(hover) });
+    if picked {
+        p.rect_filled(rect, 6.0, CARD_HI);
+    } else if hover > 0.0 {
+        p.rect_filled(rect, 6.0, CARD.gamma_multiply(hover));
     }
-    let ink = if picked { TEXT } else { DIM.lerp_to_gamma(TEXT, hover * 0.5) };
-    icon(p, kind, rect.center() - vec2(0.0, 9.0), 22.0, if picked { ACCENT } else { ink });
-    p.text(rect.center() + vec2(0.0, 15.0), egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(11.5), ink);
-    if alert {
-        p.circle_filled(rect.center() + vec2(13.0, -18.0), 4.0, BAD);
-    }
+    draw(p, rect, if picked { TEXT } else { DIM.lerp_to_gamma(TEXT, hover * 0.6) });
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, picked, name));
-    resp
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A card: rounded, one step lighter than the page, with an optional title and a note on its right.
-pub fn card<R>(ui: &mut Ui, title: &str, right: &str, body: impl FnOnce(&mut Ui) -> R) -> R {
-    let r = Frame::new().fill(CARD).stroke(Stroke::new(1.0, LINE.gamma_multiply(0.6))).corner_radius(CornerRadius::same(14))
-        .inner_margin(Margin::symmetric(0, 6)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if !title.is_empty() {
-                Frame::new().inner_margin(Margin { left: 18, right: 18, top: 10, bottom: 4 }).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(semi(title, 15.0).color(TEXT));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(small(right)));
-                    });
-                });
-            }
-            body(ui)
+/// A page in the sidebar: icon and name, and a red dot when something there needs you.
+pub fn nav_item(ui: &mut Ui, kind: Icon, name: &str, picked: bool, alert: bool) -> egui::Response {
+    side_row(ui, name, picked, |p, rect, ink| {
+        icon(p, kind, egui::pos2(rect.left() + 20.0, rect.center().y), 15.0, ink);
+        p.text(egui::pos2(rect.left() + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(13.5), ink);
+        if alert {
+            p.circle_filled(egui::pos2(rect.right() - 14.0, rect.center().y), 3.5, BAD);
+        }
+    })
+}
+
+/// An account in the sidebar: its avatar (green dot while Roblox runs) and name.
+pub fn nav_account(ui: &mut Ui, pic: Option<&egui::TextureHandle>, name: &str, live: bool, picked: bool) -> egui::Response {
+    side_row(ui, name, picked, |p, rect, ink| {
+        let c = egui::pos2(rect.left() + 20.0, rect.center().y);
+        paint_avatar(p, pic, name, c, 18.0, live, if picked { CARD_HI } else { CANVAS });
+        let text = p.layout(name.to_string(), egui::FontId::proportional(13.5), ink, rect.width() - 50.0);
+        p.galley(egui::pos2(rect.left() + 38.0, rect.center().y - text.size().y / 2.0), text, ink);
+    })
+}
+
+/// A group of settings: its title (and a short note) above a box with thin lines between its rows.
+pub fn card<R>(ui: &mut Ui, title: &str, note: &str, body: impl FnOnce(&mut Ui) -> R) -> R {
+    if !title.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(semi(title, 14.0).color(TEXT));
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(small(note)).truncate());
         });
-    ui.add_space(14.0);
+        ui.add_space(4.0);
+    }
+    let r = Frame::new().fill(CARD).stroke(Stroke::new(1.0, LINE)).corner_radius(CornerRadius::same(10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        body(ui)
+    });
+    ui.add_space(22.0);
     r.inner
+}
+
+fn divider(ui: &Ui, rect: egui::Rect, last: bool) {
+    if !last {
+        ui.painter().hline(rect.x_range().shrink(16.0), rect.bottom(), Stroke::new(1.0, LINE));
+    }
 }
 
 /// One setting: label and note on the left, its control on the right, a line under it unless it's `last`.
 /// The control gets the label's id for `labelled_by`, so screen readers name it.
 pub fn row(ui: &mut Ui, label: &str, note: &str, last: bool, control: impl FnOnce(&mut Ui, egui::Id)) {
-    let r = Frame::new().inner_margin(Margin::symmetric(18, 12)).show(ui, |ui| {
+    let r = Frame::new().inner_margin(Margin::symmetric(16, 11)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 3.0;
+        ui.spacing_mut().item_spacing.y = 2.0;
         ui.horizontal(|ui| {
             let id = ui.vertical(|ui| {
-                ui.set_max_width((ui.available_width() - 190.0).max(160.0));   // the note wraps instead of running under the control
-                let id = ui.label(RichText::new(label).size(14.0).color(TEXT)).id;
+                ui.set_max_width((ui.available_width() - 200.0).max(160.0));   // the note wraps instead of running under the control
+                let id = ui.label(RichText::new(label).size(13.5).color(TEXT)).id;
                 if !note.is_empty() {
                     ui.label(small(note));
                 }
@@ -158,46 +190,56 @@ pub fn row(ui: &mut Ui, label: &str, note: &str, last: bool, control: impl FnOnc
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| control(ui, id));
         });
     });
-    if !last {
-        let rect = r.response.rect;
-        ui.painter().hline(rect.x_range().shrink(18.0), rect.bottom(), Stroke::new(1.0, LINE));
-    }
+    divider(ui, r.response.rect, last);
 }
 
 /// A row with more controls than fit beside its text: label and note on top, the controls in a line under them.
 pub fn stack_row(ui: &mut Ui, label: &str, note: &str, last: bool, controls: impl FnOnce(&mut Ui, egui::Id)) {
-    let r = Frame::new().inner_margin(Margin::symmetric(18, 12)).show(ui, |ui| {
+    let r = Frame::new().inner_margin(Margin::symmetric(16, 11)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 3.0;
-        let id = ui.label(semi(label, 15.0).color(TEXT)).id;
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let id = ui.label(RichText::new(label).size(13.5).color(TEXT)).id;
         ui.label(small(note));
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| controls(ui, id));
     });
-    if !last {
-        let rect = r.response.rect;
-        ui.painter().hline(rect.x_range().shrink(18.0), rect.bottom(), Stroke::new(1.0, LINE));
-    }
+    divider(ui, r.response.rect, last);
+}
+
+/// A whole row you can click (an account in a list): it lights up on hover. Returns the click.
+pub fn click_row(ui: &mut Ui, id: egui::Id, name: &str, last: bool, body: impl FnOnce(&mut Ui)) -> egui::Response {
+    let bg = ui.painter().add(egui::Shape::Noop);   // drawn under the row once its size is known
+    let r = Frame::new().inner_margin(Margin::symmetric(16, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        body(ui);
+    });
+    let rect = r.response.rect;
+    let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), dur(0.1));
+    ui.painter().set(bg, egui::Shape::rect_filled(rect.shrink(1.0), 9.0, CARD_HI.gamma_multiply(hover)));
+    divider(ui, rect, last);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A setting with an on/off switch where the whole row is the button (Fitts's law: a big target). Returns
 /// true when it flipped.
 pub fn switch_row(ui: &mut Ui, label: &str, note: &str, last: bool, on: &mut bool) -> bool {
-    let bg = ui.painter().add(egui::Shape::Noop);   // hover tint, drawn under the row once its size is known
+    let bg = ui.painter().add(egui::Shape::Noop);
     let mut knob = egui::Rect::NOTHING;
-    let r = Frame::new().inner_margin(Margin::symmetric(18, 12)).show(ui, |ui| {
+    let r = Frame::new().inner_margin(Margin::symmetric(16, 11)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 3.0;
+        ui.spacing_mut().item_spacing.y = 2.0;
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.set_max_width((ui.available_width() - 70.0).max(160.0));
-                ui.label(RichText::new(label).size(14.0).color(TEXT));
+                ui.label(RichText::new(label).size(13.5).color(TEXT));
                 if !note.is_empty() {
                     ui.label(small(note));
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                knob = ui.allocate_exact_size(vec2(42.0, 22.0), Sense::hover()).0;
+                knob = ui.allocate_exact_size(vec2(34.0, 20.0), Sense::hover()).0;
             });
         });
     });
@@ -208,12 +250,10 @@ pub fn switch_row(ui: &mut Ui, label: &str, note: &str, last: bool, on: &mut boo
     if flipped {
         *on = !*on;
     }
-    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), dur(0.12));
-    ui.painter().set(bg, egui::Shape::rect_filled(rect, 10.0, Color32::from_white_alpha((hover * 6.0) as u8)));
+    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), dur(0.1));
+    ui.painter().set(bg, egui::Shape::rect_filled(rect.shrink(1.0), 9.0, CARD_HI.gamma_multiply(hover * 0.7)));
     paint_switch(ui, knob, *on, resp.is_pointer_button_down_on(), resp.id);
-    if !last {
-        ui.painter().hline(rect.x_range().shrink(18.0), rect.bottom(), Stroke::new(1.0, LINE));
-    }
+    divider(ui, rect, last);
     flipped
 }
 
@@ -221,36 +261,35 @@ pub fn switch_row(ui: &mut Ui, label: &str, note: &str, last: bool, on: &mut boo
 /// stretch), overshoots and settles (follow through), all eased in and out.
 fn paint_switch(ui: &Ui, rect: egui::Rect, on: bool, pressed: bool, id: egui::Id) {
     let ctx = ui.ctx();
-    let t = ctx.animate_bool_with_time_and_easing(id.with("knob"), on, dur(0.24), egui::emath::easing::back_out);
+    let t = ctx.animate_bool_with_time_and_easing(id.with("knob"), on, dur(0.22), egui::emath::easing::back_out);
     let press = ctx.animate_bool_with_time(id.with("press"), pressed, dur(0.08));
-    let fill = ctx.animate_bool_with_time(id.with("fill"), on, dur(0.16));
+    let fill = ctx.animate_bool_with_time(id.with("fill"), on, dur(0.15));
     let r = rect.height() / 2.0;
     let p = ui.painter();
-    p.rect_filled(rect, r, Color32::from_gray(0).lerp_to_gamma(TEXT, fill));
-    p.rect_stroke(rect, r, Stroke::new(1.0, FAINT.lerp_to_gamma(TEXT, fill)), egui::StrokeKind::Inside);
+    p.rect_filled(rect, r, LINE_HI.lerp_to_gamma(TEXT, fill));
     let travel = (t.clamp(0.0, 1.0) * std::f32::consts::PI).sin();   // biggest mid-way
-    let kr = (r - 5.0) * (1.0 - 0.18 * press);
-    let (w, h) = (kr * (1.0 + 0.55 * travel), kr * (1.0 - 0.12 * travel));
+    let kr = (r - 3.0) * (1.0 - 0.15 * press);
+    let (w, h) = (kr * (1.0 + 0.4 * travel), kr * (1.0 - 0.1 * travel));
     let x = egui::lerp((rect.left() + r)..=(rect.right() - r), t);
     let knob = egui::Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(w * 2.0, h * 2.0));
-    p.rect_filled(knob, h, DIM.lerp_to_gamma(RAIL, fill));
+    p.rect_filled(knob, h, DIM.lerp_to_gamma(CANVAS, fill));
 }
 
-/// A few choices side by side; the chosen one sits on a lighter pill that slides to the new choice.
+/// A few choices side by side; the chosen one sits on a lighter block that slides to the new choice.
 /// Returns true when the choice changed.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, label: egui::Id, value: &mut T, options: &[(T, &str)]) -> bool {
     let font = egui::FontId::proportional(13.0);
-    let widths: Vec<f32> = options.iter().map(|(_, l)| ui.painter().layout_no_wrap(l.to_string(), font.clone(), TEXT).size().x + 26.0).collect();
-    let (rect, _) = ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 6.0, 34.0), Sense::hover());
+    let widths: Vec<f32> = options.iter().map(|(_, l)| ui.painter().layout_no_wrap(l.to_string(), font.clone(), TEXT).size().x + 22.0).collect();
+    let (rect, _) = ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 4.0, 30.0), Sense::hover());
     let p = ui.painter().clone();
-    p.rect_filled(rect, 9.0, Color32::from_rgb(10, 10, 12));
-    p.rect_stroke(rect, 9.0, Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
-    let mut x = rect.left() + 3.0;
+    p.rect_filled(rect, 7.0, CANVAS);
+    p.rect_stroke(rect, 7.0, Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
+    let mut x = rect.left() + 2.0;
     let mut changed = false;
     let mut picked_at = None;
     let mut cells = Vec::new();
     for ((v, l), w) in options.iter().zip(&widths) {
-        let cell = egui::Rect::from_min_size(egui::pos2(x, rect.top() + 3.0), vec2(*w, rect.height() - 6.0));
+        let cell = egui::Rect::from_min_size(egui::pos2(x, rect.top() + 2.0), vec2(*w, rect.height() - 4.0));
         let resp = ui.interact(cell, label.with(("seg", *l)), Sense::click());
         let on = *value == *v;
         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, ui.is_enabled(), on, *l));
@@ -265,10 +304,12 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, label: egui::Id, value: &mut 
         x += w;
     }
     if let Some(cell) = picked_at {
-        let id = label.with("seg-pill");
+        let id = label.with("seg-pick");
         let left = ui.ctx().animate_value_with_time(id.with("l"), cell.left(), dur(0.18));
         let width = ui.ctx().animate_value_with_time(id.with("w"), cell.width(), dur(0.18));
-        p.rect_filled(egui::Rect::from_min_size(egui::pos2(left, cell.top()), vec2(width, cell.height())), 7.0, CARD_HI.lerp_to_gamma(Color32::from_gray(58), 0.5));
+        let r = egui::Rect::from_min_size(egui::pos2(left, cell.top()), vec2(width, cell.height()));
+        p.rect_filled(r, 5.0, CARD_HI);
+        p.rect_stroke(r, 5.0, Stroke::new(1.0, LINE_HI), egui::StrokeKind::Inside);
     }
     for (cell, l, hovered) in cells {
         let on = picked_at == Some(cell);
@@ -321,64 +362,115 @@ pub fn action(ui: &mut Ui, text: &str, busy: bool) -> egui::Response {
 }
 
 pub fn button(ui: &mut Ui, text: &str, busy: bool, primary: bool) -> egui::Response {
-    let font = if primary { egui::FontId::new(13.5, FontFamily::Name("semi".into())) } else { egui::FontId::proportional(13.5) };
-    let ink = if !ui.is_enabled() { FAINT } else if primary { RAIL } else { TEXT };
+    let font = egui::FontId::new(13.0, FontFamily::Name("semi".into()));
+    let ink = if !ui.is_enabled() { OFF } else if primary { CANVAS } else { TEXT };
     let galley = ui.painter().layout_no_wrap(text.to_string(), font, ink);
-    let size = vec2((galley.size().x + 30.0 + if busy { 20.0 } else { 0.0 }).max(84.0), 36.0);
+    let size = vec2((galley.size().x + 24.0 + if busy { 20.0 } else { 0.0 }).max(64.0), 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), text));
     let ctx = ui.ctx();
     let press = ctx.animate_bool_with_time(resp.id.with("press"), resp.is_pointer_button_down_on(), dur(0.07));
-    let hover = ctx.animate_bool_with_time(resp.id.with("hover"), resp.hovered(), dur(0.12));
+    let hover = ctx.animate_bool_with_time(resp.id.with("hover"), resp.hovered(), dur(0.1));
     let rect = egui::Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.04 * press));
     let p = ui.painter();
     if primary && ui.is_enabled() {
-        p.rect_filled(rect, 9.0, TEXT.lerp_to_gamma(Color32::from_gray(205), hover));
+        p.rect_filled(rect, 7.0, TEXT.lerp_to_gamma(Color32::from_gray(255), hover));
     } else {
-        p.rect_filled(rect, 9.0, CARD_HI.lerp_to_gamma(Color32::from_gray(46), hover));
-        p.rect_stroke(rect, 9.0, Stroke::new(1.0, LINE.lerp_to_gamma(Color32::from_gray(90), hover)), egui::StrokeKind::Inside);
+        p.rect_filled(rect, 7.0, CARD_HI.lerp_to_gamma(Color32::from_rgb(38, 39, 43), hover));
+        p.rect_stroke(rect, 7.0, Stroke::new(1.0, LINE_HI.lerp_to_gamma(Color32::from_gray(80), hover)), egui::StrokeKind::Inside);
     }
     let mut x = rect.center().x - galley.size().x / 2.0;
     if busy {
         x += 10.0;
-        egui::Spinner::new().size(14.0).color(DIM).paint_at(ui, egui::Rect::from_center_size(egui::pos2(x - 14.0, rect.center().y), vec2(14.0, 14.0)));
+        egui::Spinner::new().size(13.0).color(DIM).paint_at(ui, egui::Rect::from_center_size(egui::pos2(x - 13.0, rect.center().y), vec2(13.0, 13.0)));
     }
     p.galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, ink);
-    resp
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A small rounded label with a dot, like "● Live" or "1.2 GB".
-pub fn chip(ui: &mut Ui, text: &str, dot: Option<Color32>) {
-    Frame::new().fill(CARD_HI).corner_radius(CornerRadius::same(255)).inner_margin(Margin::symmetric(9, 3)).show(ui, |ui| {
-        // always dot first, even inside a right-to-left row
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 5.0;
-            if let Some(c) = dot {
-                let (r, _) = ui.allocate_exact_size(vec2(7.0, 12.0), Sense::hover());
-                ui.painter().circle_filled(r.center(), 3.2, c);
-            }
-            ui.label(RichText::new(text).size(12.0).color(DIM));
-        });
+/// A text-only button, for "Later" and "All Accounts" links.
+pub fn link(ui: &mut Ui, text: &str) -> egui::Response {
+    let r = ui.add(egui::Label::new(RichText::new(text).size(13.0).color(DIM)).sense(Sense::click()));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A dot and a word, like "● Running": green when on, grey when off. No box around it.
+pub fn status(ui: &mut Ui, text: &str, on: bool) {
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (r, _) = ui.allocate_exact_size(vec2(7.0, 14.0), Sense::hover());
+        ui.painter().circle_filled(r.center(), 3.5, if on { GOOD } else { OFF });
+        ui.label(RichText::new(text).size(12.5).color(if on { DIM } else { FAINT }));
     });
 }
 
-/// A round badge with the first letter of a name.
-pub fn avatar(ui: &mut Ui, name: &str, size: f32, live: bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    let p = ui.painter();
-    p.circle_filled(rect.center(), size / 2.0, if live { ACCENT.gamma_multiply(0.22) } else { CARD_HI });
-    p.circle_stroke(rect.center(), size / 2.0, Stroke::new(1.2, if live { ACCENT } else { LINE }));
-    let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-    p.text(rect.center(), egui::Align2::CENTER_CENTER, letter, egui::FontId::new(size * 0.42, FontFamily::Name("semi".into())), if live { ACCENT } else { DIM });
+/// A round avatar: the Roblox headshot when there is one, else the name's first letter. A green dot at the
+/// bottom right while Roblox is running; `ring` is the color behind it, so the dot cuts out cleanly.
+fn paint_avatar(p: &egui::Painter, pic: Option<&egui::TextureHandle>, name: &str, c: Pos2, size: f32, live: bool, ring: Color32) {
+    let rect = egui::Rect::from_center_size(c, vec2(size, size));
+    p.circle_filled(c, size / 2.0, Color32::from_rgb(42, 43, 48));
+    match pic {
+        Some(t) => {
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            p.add(egui::epaint::RectShape::filled(rect, size / 2.0, Color32::WHITE).with_texture(t.id(), uv));
+        }
+        None => {
+            let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+            p.text(c, egui::Align2::CENTER_CENTER, letter, egui::FontId::new(size * 0.45, FontFamily::Name("semi".into())), DIM);
+        }
+    }
+    if live {
+        let d = c + vec2(size * 0.36, size * 0.36);
+        p.circle_filled(d, (size * 0.13).max(3.0) + 2.0, ring);
+        p.circle_filled(d, (size * 0.13).max(3.0), GOOD);
+    }
 }
 
-/// Lines of fractions (0 to 1) over time, oldest left, with a soft fill under the first.
+pub fn avatar(ui: &mut Ui, pic: Option<&egui::TextureHandle>, name: &str, size: f32, live: bool, ring: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    paint_avatar(ui.painter(), pic, name, rect.center(), size, live, ring);
+}
+
+/// A thin bar for how full something is: white, red past 85%.
+pub fn bar(ui: &mut Ui, width: f32, share: f32) {
+    let (r, _) = ui.allocate_exact_size(vec2(width, 4.0), Sense::hover());
+    ui.painter().rect_filled(r, 2.0, LINE_HI);
+    ui.painter().rect_filled(egui::Rect::from_min_size(r.min, vec2(r.width() * share.clamp(0.0, 1.0), 4.0)), 2.0, if share > 0.85 { BAD } else { TEXT });
+}
+
+/// One slim strip of numbers split by thin lines: a small label, the number, a short line under it.
+pub fn stats(ui: &mut Ui, items: &[(&str, String, String)]) {
+    Frame::new().fill(CARD).stroke(Stroke::new(1.0, LINE)).corner_radius(CornerRadius::same(10)).show(ui, |ui| {
+        let w = ui.available_width() / items.len() as f32;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (i, (label, value, note)) in items.iter().enumerate() {
+                let r = Frame::new().inner_margin(Margin::symmetric(16, 12)).show(ui, |ui| ui.vertical(|ui| {
+                    ui.set_width(w - 32.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(*label).size(12.0).color(FAINT));
+                    ui.label(semi(value, 22.0).color(TEXT));
+                    ui.add(egui::Label::new(small(note.as_str())).truncate());
+                }));
+                if i > 0 {
+                    let rect = r.response.rect;
+                    ui.painter().vline(rect.left(), rect.y_range().shrink(12.0), Stroke::new(1.0, LINE));
+                }
+            }
+        });
+    });
+    ui.add_space(22.0);
+}
+
+/// Lines of fractions (0 to 1) over time, oldest left. The first line gets a faint fill under it.
 pub fn chart(ui: &mut Ui, size: egui::Vec2, lines: &[(&[f32], Color32)]) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter();
-    for k in 0..=3 {
-        let y = rect.bottom() - rect.height() * k as f32 / 3.0;
-        p.hline(rect.x_range(), y, Stroke::new(1.0, LINE.gamma_multiply(0.7)));
+    for k in 0..=4 {
+        let y = rect.bottom() - rect.height() * k as f32 / 4.0;
+        p.hline(rect.x_range(), y, Stroke::new(1.0, LINE.gamma_multiply(if k == 0 { 1.0 } else { 0.6 })));
+        p.text(egui::pos2(rect.right() - 2.0, y - 3.0), egui::Align2::RIGHT_BOTTOM, format!("{}%", k * 25), egui::FontId::proportional(10.5), OFF);
     }
     for (i, (vals, color)) in lines.iter().enumerate() {
         if vals.len() < 2 {
@@ -390,7 +482,7 @@ pub fn chart(ui: &mut Ui, size: egui::Vec2, lines: &[(&[f32], Color32)]) {
         if i == 0 {
             let mut mesh = egui::Mesh::default();
             for (j, pt) in pts.iter().enumerate() {
-                mesh.colored_vertex(*pt, color.gamma_multiply(0.18));
+                mesh.colored_vertex(*pt, color.gamma_multiply(0.1));
                 mesh.colored_vertex(egui::pos2(pt.x, rect.bottom()), color.gamma_multiply(0.0));
                 if j > 0 {
                     let b = (j as u32 - 1) * 2;
@@ -400,30 +492,37 @@ pub fn chart(ui: &mut Ui, size: egui::Vec2, lines: &[(&[f32], Color32)]) {
             }
             p.add(mesh);
         }
-        p.add(egui::Shape::line(pts.clone(), Stroke::new(2.0, *color)));
+        p.add(egui::Shape::line(pts.clone(), Stroke::new(1.6, *color)));
         if let Some(last) = pts.last() {
-            p.circle_filled(*last, 3.5, *color);
+            p.circle_filled(*last, 3.0, *color);
         }
     }
+}
+
+/// A short line in a legend: the line's color, then its name.
+pub fn legend(ui: &mut Ui, color: Color32, text: &str) {
+    let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+    ui.painter().hline(r.x_range(), r.center().y, Stroke::new(2.0, color));
+    ui.label(small(text));
 }
 
 /// Two lines of text in the middle of an empty area.
 pub fn centered_note(ui: &Ui, rect: egui::Rect, title: &str, note: &str) {
     let p = ui.painter();
-    p.text(rect.center() - vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, title, egui::FontId::new(14.0, FontFamily::Name("semi".into())), DIM);
-    p.text(rect.center() + vec2(0.0, 11.0), egui::Align2::CENTER_CENTER, note, egui::FontId::proportional(12.0), FAINT);
+    p.text(rect.center() - vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, title, egui::FontId::new(13.5, FontFamily::Name("semi".into())), DIM);
+    p.text(rect.center() + vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, note, egui::FontId::proportional(12.0), FAINT);
 }
 
-/// A green tick in a circle (done) or an empty ring (not yet), for checklists.
+/// A filled green circle with a tick (done) or an empty ring (not yet), for checklists.
 pub fn check(ui: &mut Ui, done: bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
     let p = ui.painter();
     let c = rect.center();
     if done {
-        p.circle_filled(c, 10.0, GOOD.gamma_multiply(0.2));
-        p.add(egui::Shape::line(vec![c + vec2(-4.5, 0.2), c + vec2(-1.2, 3.6), c + vec2(5.0, -3.4)], Stroke::new(2.0, GOOD)));
+        p.circle_filled(c, 8.0, GOOD);
+        p.add(egui::Shape::line(vec![c + vec2(-3.6, 0.2), c + vec2(-1.0, 2.8), c + vec2(3.8, -2.6)], Stroke::new(1.8, CANVAS)));
     } else {
-        p.circle_stroke(c, 9.0, Stroke::new(1.5, OFF));
+        p.circle_stroke(c, 7.5, Stroke::new(1.4, LINE_HI));
     }
 }
 
@@ -439,32 +538,33 @@ pub fn style(ctx: &egui::Context) {
     // always dark: egui otherwise follows Windows' light mode for its own buttons, boxes and checkboxes
     ctx.set_theme(egui::Theme::Dark);
     let mut v = egui::Visuals::dark();
-    // egui's dark-theme edge shading fattens dark text on the white buttons and toasts, and hinting snaps letters
-    // to whole pixels, which looks jagged at 100% scaling: a middle gamma and no hinting keep every text smooth
+    // egui's dark-theme edge shading fattens dark text on the white buttons, and hinting snaps letters to whole
+    // pixels, which looks jagged at 100% scaling: a middle gamma and no hinting keep every text smooth
     v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Gamma(0.8);
     v.text_options.font_hinting = false;
-    v.panel_fill = BG;
+    v.panel_fill = CANVAS;
     v.window_fill = CARD_HI;
+    v.window_stroke = Stroke::new(1.0, LINE_HI);
     v.override_text_color = Some(TEXT);
-    v.extreme_bg_color = Color32::from_rgb(10, 10, 12);   // text boxes
-    v.selection.bg_fill = Color32::from_rgb(70, 70, 76);
+    v.extreme_bg_color = CANVAS;   // text boxes
+    v.selection.bg_fill = Color32::from_rgb(64, 65, 72);
     v.selection.stroke = Stroke::new(1.0, TEXT);
     for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.corner_radius = CornerRadius::same(9);
+        w.corner_radius = CornerRadius::same(7);
     }
     v.widgets.inactive.weak_bg_fill = CARD_HI;
     v.widgets.inactive.bg_fill = CARD_HI;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(44, 44, 50);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(90, 90, 98));
-    v.widgets.open.weak_bg_fill = Color32::from_rgb(44, 44, 50);
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE_HI);
+    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(38, 39, 43);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_gray(80));
+    v.widgets.open.weak_bg_fill = Color32::from_rgb(38, 39, 43);
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = vec2(8.0, 6.0);
-        s.spacing.button_padding = vec2(14.0, 8.0);
-        s.spacing.interact_size.y = 34.0;
-        s.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-        s.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(13.5));
+        s.spacing.button_padding = vec2(12.0, 6.0);
+        s.spacing.interact_size.y = 30.0;
+        s.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(13.5));
+        s.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
     });
 }

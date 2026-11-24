@@ -23,14 +23,14 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshot.png" width="820" alt="The Potato window: accounts down the left, one account's settings on the right">
+  <img src="assets/screenshot.png" width="820" alt="The Potato window: the Overview, with your accounts down the left and a live picture of every alt">
 </p>
 
 Potato is one small Windows app that turns every Roblox client on your PC down to the minimum: lowest graphics, the
 FPS cap you type, trimmed RAM and a lower CPU priority. That includes clients in other Windows accounts' RDP logins,
 so a PC running alts in several RDP sessions gets them all from one window, each with its own settings.
 
-On a PC running 4 clients, one click of **Trim All Roblox** freed 3.4 GB.
+On a PC running 4 clients, one click of **Free Roblox RAM** freed 3.4 GB.
 
 ## Install
 
@@ -45,27 +45,28 @@ Closing the window keeps Potato running in the tray. New versions install themse
 | | |
 |---|---|
 | **Lowest graphics and an FPS cap** | Uses Roblox's own Graphics Quality and Maximum Frame Rate settings, per account, and puts them back every time Roblox rewrites them. |
-| **Ultra Low** | Every Fast Flag Roblox still accepts that lowers quality: lowest textures, no grass, blockier shapes, a gray sky and frozen lighting. |
-| **Trim RAM** | Moves memory Roblox isn't using to the page file, on a timer or a click, and empties Windows' standby memory when RAM gets full. |
-| **Live previews** | The Overview shows every Remote Desktop and Roblox window live, with its RAM and CPU. Click one to bring it to the front, or trim it. |
+| **Even Lower Graphics** | Every Fast Flag Roblox still accepts that lowers quality: lowest textures, no grass, blockier shapes, a gray sky and frozen lighting. |
+| **Free RAM** | Moves RAM Roblox isn't using out of the way, on a timer or a click, and clears the files Windows keeps in RAM when it gets full. |
+| **Live previews** | The Overview shows every Remote Desktop and Roblox window live, with its RAM and CPU. Click one to bring it to the front, or free its RAM. Every account shows its Roblox avatar. |
 | **CPU control** | Priority, a hard CPU limit per client, its own CPU cores and Windows 11 Efficiency Mode. Remote Desktop windows and AutoHotkey can get their own cores, away from Roblox. |
-| **Power settings** | Windows' High Performance plan, CPU boost off and Fast Startup off, each with an Apply button and an Undo button that puts Windows' own setting back. The Performance page lists every step from the guides with one Apply Recommended button. |
+| **Power settings** | Windows' High Performance plan, CPU boost off and Fast Startup off, each with a button to turn it on and an Undo button that puts Windows' own setting back. The Performance page lists every step from the guides with one Turn On All Of These button. |
+| **Stop Windows Updates** | Stops Windows updating and restarting by itself, so an update can't undo alts signing in together, and keeps it stopped. The Microsoft Store can't install or update apps until you undo it. |
 | **Restart into the same server** | Closes clients and reopens each one in the server it was in, public or private. On a click, every few hours, or when a client grows past a memory limit you set. |
 | **Clean up after outages** | One Client Only closes the older copy when a second Roblox opens on the same account. Rejoin After A Crash reopens a client that closed by itself. |
 | **Open maximized** | Every Roblox window fills the screen with its title bar kept, in every RDP login. |
 | **Discord reports** | Posts each account's RAM, CPU, uptime, freezes and restarts to a Discord webhook, with a screenshot of each RDP's Roblox. |
-| **Remote Desktop alts** | Patches Windows so every account can be on at once, warns you when an update undoes it, makes new alt accounts and opens each one with no password box. Desktop shortcuts per account with no sound, no drives, no wallpaper, 1366x768 or 1800x768, and the account's name on its window. Tells you how many your PC can run. |
+| **Remote Desktop alts** | Changes Windows so all your alts can be signed in together, warns you when an update undoes it, makes new alt accounts and opens each one with no password box. Desktop shortcuts per account with no sound, no drives, no wallpaper, 1366x768 or 1800x768, and the account's name on its window. Tells you how many your PC can run. |
 | **Upload cap and timer** | Limits how fast Roblox uploads on a slow connection, and turns the PC off at a time you pick. |
 
 ## Is it safe?
 
-Potato never asks for your Roblox login and never reads your cookie. It doesn't inject into Roblox, read its memory
+Potato never asks for your Roblox login and never reads your cookie. It only reads which Roblox account is signed in on each Windows account, to show its avatar. It doesn't inject into Roblox, read its memory
 or unlock its frame rate. It changes Roblox's own settings files and uses the same Windows features as Task
-Manager, Process Lasso and Mem Reduct. Every file it changes gets a backup first, and **Restore Original
-Settings** puts them all back.
+Manager, Process Lasso and Mem Reduct. Every file it changes gets a backup first, and **Undo Everything
+Potato Changed** puts them all back.
 
 It works alongside macros that read the screen. Lowest Graphics and an FPS cap of 25 or more are the settings those
-macros ask for themselves. Leave Ultra Low off on an account a macro runs, since it changes how the game looks.
+macros ask for themselves. Leave Even Lower Graphics off on an account a macro runs, since it changes how the game looks.
 
 ## Compared to other tools
 
@@ -73,7 +74,7 @@ macros ask for themselves. Leave Ultra Low off on an account a macro runs, since
 |---|:---:|:---:|:---:|
 | Lowest graphics and FPS cap, per account | Yes | | |
 | Works on Roblox in every RDP login | Yes | Yes | Yes |
-| Trims Roblox's RAM | Yes | Yes | Yes |
+| Frees Roblox's RAM | Yes | Yes | Yes |
 | CPU priority, cores and limits | Yes | | Yes |
 | Live previews of every RDP | Yes | | |
 | Restarts a client into the same server | Yes | | |
@@ -85,11 +86,11 @@ macros ask for themselves. Leave Ultra Low off on an account a macro runs, since
 - **Settings:** each account's `AppData\Local\Roblox\GlobalBasicSettings_*.xml` (`SavedQualityLevel`,
   `GraphicsQualityLevel`, `FramerateCap`, `Fullscreen`). Potato only edits values already in the file, and only while
   that account's Roblox is closed, since Roblox writes the file when it exits.
-- **Ultra Low:** `ClientAppSettings.json` in each Roblox version folder and in Bloxstrap's and Fishstrap's
+- **Even Lower Graphics:** `ClientAppSettings.json` in each Roblox version folder and in Bloxstrap's and Fishstrap's
   `Modifications` folder. Only flags on Roblox's
   [allowlist](https://devforum.roblox.com/t/allowlist-for-local-client-configuration-via-fast-flags/3966569),
   since Roblox ignores the rest. Your own flags stay. Roblox no longer accepts the old render-resolution flags, so
-  Ultra Low can't make the game pixelated.
+  Even Lower Graphics can't make the game pixelated.
 - **RDP logins:** Windows only lets a program move windows, play with audio and take screenshots in its own login. So
   Potato copies itself to `C:\ProgramData\Potato` and adds a hidden logon task that runs `Potato.exe --helper` in
   each login. The helper maximizes, mutes, counts freezes, takes screenshots and reopens clients there.

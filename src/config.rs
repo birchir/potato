@@ -78,9 +78,9 @@ impl Preset {
 
     pub fn note(self) -> &'static str {
         match self {
-            Preset::MaxSavings => "Alts: Ultra Low, 30 FPS, lower priority, muted",
-            Preset::Balanced => "Lowest graphics, 60 FPS, muted",
-            Preset::FullQuality => "Roblox as it comes: no cap, normal graphics",
+            Preset::MaxSavings => "Best for alts: even lower graphics, 30 FPS, lower priority, no sound",
+            Preset::Balanced => "Lowest graphics, 60 FPS, no sound",
+            Preset::FullQuality => "Roblox the way it normally is: no FPS cap, normal graphics",
         }
     }
 
@@ -140,6 +140,8 @@ pub struct Config {
     pub rdp_cpu_limit: u32,
     /// Windows' Remote Desktop file has been seen patched for several sessions, so a revert gets a warning
     pub rdp_patched: bool,
+    /// keep Windows Update stopped: Potato turns its service off again whenever Windows turns it back on
+    pub block_updates: bool,
     /// Remote Desktop accounts opened when you sign in to Windows
     pub rdp_startup: Vec<String>,
     /// Remote Desktop accounts that open at 1800x768 (the guide's size for boosting and Honeyday) instead of 1366x768
@@ -170,7 +172,7 @@ impl Discord {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            accounts: BTreeMap::new(), cores_per_client: 0, helper_cores: 0, trim_minutes: 5, clean_above: 0, restart_hours: 0, upload_kbps: 0, rdp_cpu_limit: 0, rdp_patched: false, rdp_startup: Vec::new(), rdp_wide: Vec::new(),
+            accounts: BTreeMap::new(), cores_per_client: 0, helper_cores: 0, trim_minutes: 5, clean_above: 0, restart_hours: 0, upload_kbps: 0, rdp_cpu_limit: 0, rdp_patched: false, block_updates: false, rdp_startup: Vec::new(), rdp_wide: Vec::new(),
             shutdown_at: String::new(), notify: true, discord: Discord { webhook: String::new(), screenshots: true },
         }
     }
@@ -193,7 +195,7 @@ impl Config {
         }))).collect();
         serde_json::to_string_pretty(&json!({
             "accounts": accounts, "coresPerClient": self.cores_per_client, "helperCores": self.helper_cores, "trimMinutes": self.trim_minutes, "cleanAbove": self.clean_above,
-            "restartHours": self.restart_hours, "uploadKbps": self.upload_kbps, "rdpCpuLimit": self.rdp_cpu_limit, "rdpPatched": self.rdp_patched, "rdpStartup": self.rdp_startup, "rdpWide": self.rdp_wide, "shutdownAt": self.shutdown_at, "notify": self.notify,
+            "restartHours": self.restart_hours, "uploadKbps": self.upload_kbps, "rdpCpuLimit": self.rdp_cpu_limit, "rdpPatched": self.rdp_patched, "blockUpdates": self.block_updates, "rdpStartup": self.rdp_startup, "rdpWide": self.rdp_wide, "shutdownAt": self.shutdown_at, "notify": self.notify,
             "discord": { "webhook": self.discord.webhook, "screenshots": self.discord.screenshots },
         }))
         .unwrap()
@@ -235,6 +237,7 @@ impl Config {
             upload_kbps: num(&v["uploadKbps"], d.upload_kbps),
             rdp_cpu_limit: num(&v["rdpCpuLimit"], 0).min(100),
             rdp_patched: v["rdpPatched"].as_bool().unwrap_or(d.rdp_patched),
+            block_updates: v["blockUpdates"].as_bool().unwrap_or(d.block_updates),
             rdp_startup: names(&v["rdpStartup"]),
             rdp_wide: names(&v["rdpWide"]),
             shutdown_at: v["shutdownAt"].as_str().and_then(parse_time).map(format_time).unwrap_or_default(),
@@ -346,7 +349,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let mut c = Config { cores_per_client: 2, helper_cores: 3, trim_minutes: 0, clean_above: 85, restart_hours: 6, upload_kbps: 512, rdp_cpu_limit: 80, rdp_patched: true, rdp_startup: vec!["Alt1".into()], rdp_wide: vec!["Alt2".into()],
+        let mut c = Config { cores_per_client: 2, helper_cores: 3, trim_minutes: 0, clean_above: 85, restart_hours: 6, upload_kbps: 512, rdp_cpu_limit: 80, rdp_patched: true, block_updates: true, rdp_startup: vec!["Alt1".into()], rdp_wide: vec!["Alt2".into()],
                                 shutdown_at: "06:30".into(), notify: false, ..Config::default() };
         c.discord = Discord { webhook: "https://discord.com/api/webhooks/123/abc-DEF_9".into(), screenshots: false };
         c.account_mut("S-1-5-21-4").mute = true;

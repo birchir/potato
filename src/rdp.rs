@@ -151,7 +151,7 @@ pub fn patch() -> Result<(), String> {
     let done = swap_in(&tmp);
     let _ = std::fs::remove_file(&tmp);
     done?;
-    if look().patch == Patch::Patched { Ok(()) } else { Err("Windows Kept Its Own File".into()) }
+    if look().patch == Patch::Patched { Ok(()) } else { Err("Windows Didn't Let Potato Change It".into()) }
 }
 
 /// Put Windows' own file back.
@@ -176,7 +176,7 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' fDenyT
 "#;
     let name = name.trim();
     system::powershell(ADD, &[("POTATO_USER", name), ("POTATO_PASS", password)])?;
-    if system::save_rdp_login(&address(name), name, password) { Ok(()) } else { Err("Made It, But Couldn't Save Its Login".into()) }
+    if system::save_rdp_login(&address(name), name, password) { Ok(()) } else { Err("Added The Alt, But Couldn't Save Its Password".into()) }
 }
 
 /// The account's Remote Desktop settings, as the user's RDP Plus shortcuts set them up

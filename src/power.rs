@@ -1,6 +1,7 @@
-//! The guides' Windows power settings: the High Performance plan, CPU boost off and Fast Startup off. They live in
-//! Windows, not in Potato's settings: Potato reads them from Windows and changes them only when you press Apply or
-//! Undo, and they stay as they are when Potato closes.
+//! Windows settings Potato changes on a button: the guides' High Performance plan, CPU boost off and Fast Startup
+//! off, and stopping Windows Update. They live in Windows, not in Potato's settings: Potato reads them from
+//! Windows and changes them only when you press Apply or Undo, and they stay as they are when Potato closes.
+//! (Stopping updates is the one Potato also keeps up: Windows turns its update service back on by itself.)
 
 /// What Windows has now.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -8,6 +9,7 @@ pub struct State {
     pub high_performance: bool,
     pub boost_off: bool,
     pub fast_startup_off: bool,
+    pub updates_off: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -15,16 +17,16 @@ pub enum Item {
     HighPerformance,
     BoostOff,
     FastStartupOff,
+    UpdatesOff,
 }
 
 impl Item {
-    pub const ALL: [Item; 3] = [Item::HighPerformance, Item::BoostOff, Item::FastStartupOff];
-
     pub fn is_on(self, s: &State) -> bool {
         match self {
             Item::HighPerformance => s.high_performance,
             Item::BoostOff => s.boost_off,
             Item::FastStartupOff => s.fast_startup_off,
+            Item::UpdatesOff => s.updates_off,
         }
     }
 }
@@ -49,8 +51,13 @@ pub fn boost_is_off(qh: &str) -> Option<bool> {
     u32::from_str_radix(hex.get(..8).unwrap_or(hex), 16).ok().map(|v| v == 0)
 }
 
+/// `reg query ...\Services\wuauserv /v Start`: 4 is Disabled.
+pub fn updates_are_off(query: &str) -> bool {
+    query.lines().any(|l| l.contains("Start") && l.trim_end().ends_with("0x4"))
+}
+
 #[cfg(windows)]
-pub use imp::{apply, read};
+pub use imp::{apply, read, updates_off};
 
 #[cfg(windows)]
 mod imp {
@@ -69,6 +76,27 @@ mod imp {
             high_performance: is_high_performance(&out("powercfg", &["/getactivescheme"])),
             boost_off: boost_is_off(&out("powercfg", &["/qh", "SCHEME_CURRENT", "SUB_PROCESSOR", "PERFBOOSTMODE"])).unwrap_or(false),
             fast_startup_off: fast.is_ok_and(|v| v.trim() == "0"),
+            updates_off: updates_off(),
+        }
+    }
+
+    const WU: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\wuauserv";
+    const WU_POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU";
+
+    pub fn updates_off() -> bool {
+        updates_are_off(&out("reg", &["query", WU, "/v", "Start"]))
+    }
+
+    /// Windows Update's service off and its policy set to never update by itself. Undo is Windows' default
+    /// (the service starts when needed, no policy).
+    fn set_updates(off: bool) -> bool {
+        if off {
+            let _ = system::run("sc", &["stop", "wuauserv"]);   // fails when it isn't running, which is fine
+            system::run("reg", &["add", WU_POLICY, "/v", "NoAutoUpdate", "/t", "REG_DWORD", "/d", "1", "/f"])
+                && system::run("sc", &["config", "wuauserv", "start=", "disabled"])
+        } else {
+            let _ = system::run("reg", &["delete", WU_POLICY, "/v", "NoAutoUpdate", "/f"]);
+            system::run("sc", &["config", "wuauserv", "start=", "demand"])
         }
     }
 
@@ -100,6 +128,7 @@ if ($LASTEXITCODE -ne 0) {
             Item::BoostOff => set_boost(on),
             Item::FastStartupOff => system::run("reg", &["add", r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power", "/v", "HiberbootEnabled",
                                                       "/t", "REG_DWORD", "/d", if on { "0" } else { "1" }, "/f"]),
+            Item::UpdatesOff => set_updates(on),
         };
         if ok { Ok(()) } else { Err("Windows Didn't Take The Change".into()) }
     }
@@ -109,10 +138,14 @@ if ($LASTEXITCODE -ne 0) {
 #[cfg(not(windows))]
 mod imp {
     use super::*;
-    static NOW: std::sync::Mutex<State> = std::sync::Mutex::new(State { high_performance: false, boost_off: false, fast_startup_off: false });
+    static NOW: std::sync::Mutex<State> = std::sync::Mutex::new(State { high_performance: false, boost_off: false, fast_startup_off: false, updates_off: false });
 
     pub fn read() -> State {
         *NOW.lock().unwrap()
+    }
+
+    pub fn updates_off() -> bool {
+        NOW.lock().unwrap().updates_off
     }
 
     pub fn apply(item: Item, on: bool) -> Result<(), String> {
@@ -121,13 +154,14 @@ mod imp {
             Item::HighPerformance => s.high_performance = on,
             Item::BoostOff => s.boost_off = on,
             Item::FastStartupOff => s.fast_startup_off = on,
+            Item::UpdatesOff => s.updates_off = on,
         }
         Ok(())
     }
 }
 
 #[cfg(not(windows))]
-pub use imp::{apply, read};
+pub use imp::{apply, read, updates_off};
 
 #[cfg(test)]
 mod tests {
@@ -142,5 +176,9 @@ mod tests {
         assert_eq!(boost_is_off(qh), Some(true));
         assert_eq!(boost_is_off(&qh.replace("AC Power Setting Index: 0x00000000", "AC Power Setting Index: 0x00000002")), Some(false));
         assert_eq!(boost_is_off("no setting here"), None);
+        let wu = "\r\nHKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\wuauserv\r\n    Start    REG_DWORD    0x4\r\n";
+        assert!(updates_are_off(wu));
+        assert!(!updates_are_off(&wu.replace("0x4", "0x3")));
+        assert!(!updates_are_off(""));
     }
 }

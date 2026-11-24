@@ -69,7 +69,7 @@ pub fn launch(_: &str) -> bool {
 
 pub fn profiles() -> Vec<Profile> {
     ACCOUNTS.iter().enumerate().map(|(i, (name, _, _))| Profile {
-        sid: format!("S-1-5-21-{i}"), name: name.to_string(), local: std::env::temp_dir().join("potato-demo-missing"),
+        sid: format!("S-1-5-21-{i}"), name: name.to_string(), local: std::env::temp_dir().join("potato-demo").join(name),
     }).collect()
 }
 
