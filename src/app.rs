@@ -1089,7 +1089,7 @@ impl App {
         let r = e.rdp.lock().unwrap().clone();
         let busy = r.busy;
         let (mut patch, mut undo, mut add, mut open, mut show, mut open_all, mut restart) = (false, false, false, None, None, false, false);
-        let (mut startup, mut shortcut, mut wide, mut remove) = (None, None, None, None);
+        let (mut startup, mut shortcut, mut wide, mut remove, mut tidy) = (None, None, None, None, None);
         let (mut change, mut expire, mut repair) = (None, false, false);
         let armed = self.confirm_remove.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_secs(4)).map(|(n, _)| n.clone());
         let ram_gb = (e.memory.1 as f64 / (1u64 << 30) as f64 * 10.0).round() / 10.0;   // what Task Manager shows: 7.99 is 8.0 GB
@@ -1230,6 +1230,9 @@ impl App {
                             if action(ui, "Desktop Shortcut", false).on_hover_text("Puts a shortcut on your desktop that opens this alt with these settings, even without Potato").clicked() {
                                 shortcut = Some(name.clone());
                             }
+                            if action(ui, "Tidy Desktop", false).on_hover_text("Dark mode, a black background, no see-through windows, and a bare taskbar with only File Explorer and your browser. Done in the alt the next time it's open. Hides the taskbar news for the whole PC").clicked() {
+                                tidy = Some(name.clone());
+                            }
                         });
                         id
                     }).inner;
@@ -1302,6 +1305,12 @@ impl App {
                 e.config.rdp_wide.push(name.clone());
             }
             let _ = crate::rdp::write_file(&name, w);   // a desktop shortcut opens the file: keep it in step
+        }
+        if let Some(name) = tidy {
+            e.note = match crate::rdp::request_tidy(&name) {
+                Ok(()) => format!("Tidying {name}'s Desktop. Its Taskbar Flickers Once"),
+                Err(_) => "Couldn't Tidy The Desktop".into(),
+            };
         }
         if let Some(name) = shortcut {
             e.note = match crate::rdp::desktop_shortcut(&name, e.config.rdp_wide.contains(&name)) {

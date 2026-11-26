@@ -121,6 +121,54 @@ fn hold_multi(on: bool, held: &mut Vec<isize>) {
     }
 }
 
+/// Tidy Desktop, asked for on the Remote Desktop page: run once per request in this login, as this user.
+fn serve_tidy() {
+    let user = std::env::var("USERNAME").unwrap_or_default().to_lowercase();
+    let Ok(id) = std::fs::read_to_string(crate::engine::config_path().with_file_name("desktop").join(format!("{user}.txt"))) else { return };
+    // the request sits in Potato's shared folder, which an alt can't delete from: remember what's done in its own profile
+    let done = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Potato").join("desktop-done.txt");
+    if std::fs::read_to_string(&done).is_ok_and(|d| d.trim() == id.trim()) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(done.parent().unwrap());
+    let _ = std::fs::write(&done, id.trim());   // first, so a script that fails can't run again every second
+    let _ = crate::system::powershell(TIDY, &[]);
+}
+
+/// Dark mode, no transparency, a black background, a bare taskbar (no search, Task View, news, People or chat).
+/// Restarting Explorer also brings in the pins `rdp::request_tidy` set (File Explorer and the browser).
+const TIDY: &str = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+function Set-Dword($key, $name, $value) { New-Item $key -Force:$false -ErrorAction SilentlyContinue | Out-Null; Set-ItemProperty $key $name $value -Type DWord }
+$adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+$theme = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+Set-Dword $theme AppsUseLightTheme 0
+Set-Dword $theme SystemUsesLightTheme 0
+Set-Dword $theme EnableTransparency 0
+Set-Dword 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' SearchboxTaskbarMode 0
+Set-Dword $adv ShowTaskViewButton 0
+Set-Dword $adv ShowCortanaButton 0
+Set-Dword $adv TaskbarMn 0
+Set-Dword $adv TaskbarDa 0
+Set-Dword "$adv\People" PeopleBand 0
+Set-Dword 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Feeds' ShellFeedsTaskbarViewMode 2
+Set-ItemProperty 'HKCU:\Control Panel\Colors' Background '0 0 0'
+Set-ItemProperty 'HKCU:\Control Panel\Desktop' Wallpaper ''
+Add-Type -Namespace Potato -Name W -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SystemParametersInfo(int a, int b, string c, int d); [DllImport("user32.dll")] public static extern bool SetSysColors(int n, int[] e, int[] c);'
+[Potato.W]::SystemParametersInfo(20, 0, '', 3) | Out-Null
+[Potato.W]::SetSysColors(1, @(1), @(0)) | Out-Null
+
+# clear the pins while Explorer is closed (it saves its own list when it exits), then let it start again
+$session = (Get-Process -Id $PID).SessionId
+Get-Process explorer | Where-Object SessionId -eq $session | Stop-Process -Force
+Start-Sleep 2
+Remove-Item "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\*" -Force
+Remove-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband' -Recurse -Force
+Start-Sleep 3
+if (-not (Get-Process explorer | Where-Object SessionId -eq $session)) { Start-Process explorer.exe }
+
+"#;
+
 /// The folder where the helpers leave freeze counts and screenshots for the report (see engine.rs).
 pub fn report_dir() -> PathBuf {
     crate::engine::config_path().with_file_name("report")
@@ -132,6 +180,7 @@ pub fn session_tick(me: &str, jobs: &mut SessionJobs) {
     let a = config.account(me);
     mute(a.on && a.mute, &mut jobs.muted);
     hold_multi(a.on && a.multi_roblox, &mut jobs.multi);
+    serve_tidy();
 
     let mut windows: Vec<isize> = Vec::new();
     unsafe {

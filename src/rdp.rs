@@ -500,6 +500,67 @@ $s.Save()
         .map(|out| out.contains("plus")).map_err(|_| "Couldn't Make The Shortcut".into())
 }
 
+/// Tidy Desktop: pin only File Explorer and the alt's default browser (Windows' taskbar layout policy in the alt's
+/// own registry, which needs admin, so it's done here), hide the taskbar news for the whole PC (a machine policy),
+/// then ask the alt's helper to do the rest in its own login (`helper::serve_tidy`, the next time it's signed in).
+pub fn request_tidy(name: &str) -> Result<(), String> {
+    let dir = store().join("desktop");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let _ = system::powershell(PINS, &[("POTATO_NAME", name), ("POTATO_DIR", &dir.to_string_lossy())]);
+    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    std::fs::write(dir.join(format!("{}.txt", name.to_lowercase())), id.to_string()).map_err(|e| e.to_string())
+}
+
+/// Scripts can't pin to the taskbar any more (the pin command doesn't show up for them), so the pins come from a
+/// taskbar layout file, set as a policy for that one user. Explorer applies it when it next starts.
+const PINS: &str = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds' -Force | Out-Null
+Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds' EnableFeeds 0 -Type DWord
+$name = $env:POTATO_NAME; $dir = $env:POTATO_DIR
+$sid = (New-Object Security.Principal.NTAccount($name)).Translate([Security.Principal.SecurityIdentifier]).Value
+if (-not $sid) { return }
+$root = "Registry::HKEY_USERS\$sid"
+$loaded = Test-Path $root
+if (-not $loaded) {
+    $userDir = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
+    if (-not $userDir) { return }   # never signed in: no registry to write to yet
+    reg load 'HKU\PotatoTidy' "$userDir\NTUSER.DAT" | Out-Null
+    $root = 'Registry::HKEY_USERS\PotatoTidy'
+}
+$exe = $null
+$prog = (Get-ItemProperty "$root\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice").ProgId
+if ($prog) {
+    $cmd = (Get-ItemProperty "$root\Software\Classes\$prog\shell\open\command").'(default)'
+    if (-not $cmd) { $cmd = (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\$prog\shell\open\command").'(default)' }
+    if ($cmd -match '^"([^"]+)"' -or $cmd -match '^(\S+\.exe)') { $exe = $Matches[1] }
+}
+if (-not $exe -or -not (Test-Path $exe)) { $exe = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" }
+$title = (Get-Item $exe).VersionInfo.FileDescription
+if (-not $title) { $title = [IO.Path]::GetFileNameWithoutExtension($exe) }
+$lnk = Join-Path $dir "$title.lnk"
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $s.TargetPath = $exe; $s.Save()
+$xml = Join-Path $dir "$name-taskbar.xml"
+@"
+<?xml version="1.0" encoding="utf-8"?>
+<LayoutModificationTemplate xmlns="http://schemas.microsoft.com/Start/2014/LayoutModification" xmlns:defaultlayout="http://schemas.microsoft.com/Start/2014/FullDefaultLayout" xmlns:taskbar="http://schemas.microsoft.com/Start/2014/TaskbarLayout" Version="1">
+  <CustomTaskbarLayoutCollection PinListPlacement="Replace">
+    <defaultlayout:TaskbarLayout>
+      <taskbar:TaskbarPinList>
+        <taskbar:DesktopApp DesktopApplicationLinkPath="%APPDATA%\Microsoft\Windows\Start Menu\Programs\System Tools\File Explorer.lnk" />
+        <taskbar:DesktopApp DesktopApplicationLinkPath="$lnk" />
+      </taskbar:TaskbarPinList>
+    </defaultlayout:TaskbarLayout>
+  </CustomTaskbarLayoutCollection>
+</LayoutModificationTemplate>
+"@ | Set-Content $xml -Encoding UTF8
+$k = "$root\Software\Policies\Microsoft\Windows\Explorer"
+New-Item $k -Force | Out-Null
+Set-ItemProperty $k StartLayoutFile $xml
+Set-ItemProperty $k LockedStartLayout 1 -Type DWord
+if (-not $loaded) { [GC]::Collect(); Start-Sleep 1; reg unload 'HKU\PotatoTidy' | Out-Null }
+"#;
+
 /// How many Remote Desktops the guide says this PC can run steadily: the lower of its CPU and RAM tests.
 /// CPU: cores - 2, or (logical processors - 4) / 2 when those aren't one or two a core (newer Intel). RAM: 4 GB
 /// each, after 4 GB for Windows (8 GB from 32 GB of RAM up), rounded down.
