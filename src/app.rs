@@ -824,6 +824,10 @@ impl App {
                     let mut one = a.max_clients > 0;
                     if switch_row(ui, "Only One Roblox At A Time", "If a second Roblox opens on this account, the older one closes", false, &mut one) {
                         a.max_clients = one as u32;
+                        a.multi_roblox &= !one;
+                    }
+                    if switch_row(ui, "Multiple Roblox At Once", "Open as many Roblox as you want on this account. Close every Roblox before turning it on", false, &mut a.multi_roblox) && a.multi_roblox {
+                        a.max_clients = 0;
                     }
                     row(ui, "Restart If It Uses Too Much RAM", "Restarts Roblox into the same server past this much. Empty for never", false, |ui, id| {
                         number_box(ui, id, &mut a.ram_limit_mb, 99_999, "MB", "Never");
@@ -1301,7 +1305,8 @@ impl App {
         }
         if let Some(name) = shortcut {
             e.note = match crate::rdp::desktop_shortcut(&name, e.config.rdp_wide.contains(&name)) {
-                Ok(()) => format!("Put {name} On Your Desktop"),
+                Ok(true) => format!("Put {name} On Your Desktop (RDP Plus)"),
+                Ok(false) => format!("Put {name} On Your Desktop (No rdp.exe In Downloads, So It Uses Windows' Remote Desktop)"),
                 Err(m) => m,
             };
         }

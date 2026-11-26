@@ -458,23 +458,46 @@ pub fn open(name: &str, wide: bool) -> Result<(), String> {
     std::process::Command::new("mstsc").arg(&file).spawn().map(|_| ()).map_err(|_| "Couldn't Open Remote Desktop".into())
 }
 
-/// A desktop shortcut that opens the account straight in Windows' Remote Desktop with its .rdp file (every guide
-/// setting is in the file, so the shortcut works without Potato running).
-pub fn desktop_shortcut(name: &str, wide: bool) -> Result<(), String> {
+/// RDP Plus's command line for the account, the user's own shortcut string with the account's address, name and
+/// size (it signs in with the login Make Account saved for that address).
+pub fn rdp_plus_args(name: &str, wide: bool) -> String {
+    let w = if wide { 1800 } else { 1366 };
+    format!(r#"/v:{} /i:{name} /title:"{name}" /nodrives /nosound /nowallpaper /o:"keyboardhook:i:0" /w:{w} /h:768"#, address(name))
+}
+
+/// A desktop shortcut that opens the account. With RDP Plus (rdp.exe in Downloads or on the Desktop, copied once into
+/// Potato's folder so the shortcut keeps working if the download is moved) it runs that with the user's string;
+/// without it, Windows' Remote Desktop with the .rdp file. Either works without Potato running.
+pub fn desktop_shortcut(name: &str, wide: bool) -> Result<bool, String> {
     let file = write_file(name, wide)?;
     const MAKE: &str = r#"
 $ErrorActionPreference = 'Stop'
+$exe = Join-Path $env:POTATO_DIR 'rdp.exe'
+if (-not (Test-Path $exe)) {
+    $found = @("$env:USERPROFILE\Downloads\rdp.exe", ([Environment]::GetFolderPath('Desktop') + '\rdp.exe')) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($found) { Copy-Item $found $exe }
+}
 $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) ($env:POTATO_NAME + ' (Remote Desktop).lnk')
 $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-$s.TargetPath = "$env:windir\System32\mstsc.exe"
-$s.Arguments = '"' + $env:POTATO_RDP + '"'
-$s.WorkingDirectory = Split-Path $env:POTATO_RDP
-$s.IconLocation = "$env:windir\System32\mstsc.exe,0"
+if (Test-Path $exe) {
+    $s.TargetPath = $exe
+    $s.Arguments = $env:POTATO_ARGS
+    $s.WorkingDirectory = $env:POTATO_DIR
+    $s.IconLocation = "$exe,0"
+    'plus'
+} else {
+    $s.TargetPath = "$env:windir\System32\mstsc.exe"
+    $s.Arguments = '"' + $env:POTATO_RDP + '"'
+    $s.WorkingDirectory = Split-Path $env:POTATO_RDP
+    $s.IconLocation = "$env:windir\System32\mstsc.exe,0"
+}
 $s.Description = "Opens $env:POTATO_NAME in Remote Desktop with Potato's light settings"
 $s.Save()
 "#;
-    system::powershell(MAKE, &[("POTATO_NAME", name), ("POTATO_RDP", &file.to_string_lossy())]).map(|_| ())
-        .map_err(|_| "Couldn't Make The Shortcut".into())
+    let dir = store();
+    system::powershell(MAKE, &[("POTATO_NAME", name), ("POTATO_RDP", &file.to_string_lossy()),
+                               ("POTATO_DIR", &dir.to_string_lossy()), ("POTATO_ARGS", &rdp_plus_args(name, wide))])
+        .map(|out| out.contains("plus")).map_err(|_| "Couldn't Make The Shortcut".into())
 }
 
 /// How many Remote Desktops the guide says this PC can run steadily: the lower of its CPU and RAM tests.
@@ -573,6 +596,14 @@ mod tests {
         let xml = startup_task("S-1-5-21-9", Path::new("C:\\P\\Potato.exe"), true).unwrap();
         assert!(xml.contains("<UserId>S-1-5-21-9</UserId><Delay>"));
         assert!(xml.contains("<Command>C:\\P\\Potato.exe</Command><Arguments>--open-rdp</Arguments>"));
+    }
+
+    #[test]
+    fn rdp_plus_args_match_the_users_shortcut() {
+        let a = address("Alt1");
+        assert_eq!(rdp_plus_args("Alt1", false),
+                   format!(r#"/v:{a} /i:Alt1 /title:"Alt1" /nodrives /nosound /nowallpaper /o:"keyboardhook:i:0" /w:1366 /h:768"#));
+        assert!(rdp_plus_args("Alt1", true).contains("/w:1800 /h:768"));
     }
 
     #[test]

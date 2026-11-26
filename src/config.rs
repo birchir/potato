@@ -46,6 +46,8 @@ pub struct Account {
     pub efficiency: bool,
     /// keep only this many Roblox clients, the newest; older ones are closed (0 = off)
     pub max_clients: u32,
+    /// let several Roblox clients run at once in this account's login (its helper holds Roblox's one-client lock)
+    pub multi_roblox: bool,
     /// silence the clients (the account's helper does it, in its own login)
     pub mute: bool,
     /// hard CPU cap per client in percent of the whole PC (0 = off)
@@ -112,6 +114,7 @@ impl Default for Account {
             priority: Priority::Normal,
             efficiency: false,
             max_clients: 0,
+            multi_roblox: false,
             mute: false,
             cpu_limit: 0,
             ram_limit_mb: 0,
@@ -190,7 +193,7 @@ impl Config {
     pub fn to_json(&self) -> String {
         let accounts: serde_json::Map<String, Value> = self.accounts.iter().map(|(sid, a)| (sid.clone(), json!({
             "on": a.on, "lowestGraphics": a.plan.lowest_graphics, "fpsCap": a.plan.fps_cap, "ultraLow": a.plan.ultra_low,
-            "maximized": a.plan.maximized, "priority": a.priority.key(), "efficiency": a.efficiency, "maxClients": a.max_clients,
+            "maximized": a.plan.maximized, "priority": a.priority.key(), "efficiency": a.efficiency, "maxClients": a.max_clients, "multiRoblox": a.multi_roblox,
             "mute": a.mute, "cpuLimit": a.cpu_limit, "ramLimitMb": a.ram_limit_mb, "rejoinCrashed": a.rejoin_crashed,
         }))).collect();
         serde_json::to_string_pretty(&json!({
@@ -221,6 +224,7 @@ impl Config {
                 priority: Priority::ALL.into_iter().find(|p| a["priority"].as_str() == Some(p.key())).unwrap_or(base.priority),
                 efficiency: flag("efficiency", base.efficiency),
                 max_clients: num(&a["maxClients"], 0),
+                multi_roblox: flag("multiRoblox", base.multi_roblox),
                 mute: flag("mute", base.mute),
                 cpu_limit: num(&a["cpuLimit"], 0).min(100),
                 ram_limit_mb: num(&a["ramLimitMb"], 0),
@@ -353,6 +357,7 @@ mod tests {
                                 shutdown_at: "06:30".into(), notify: false, ..Config::default() };
         c.discord = Discord { webhook: "https://discord.com/api/webhooks/123/abc-DEF_9".into(), screenshots: false };
         c.account_mut("S-1-5-21-4").mute = true;
+        c.account_mut("S-1-5-21-4").multi_roblox = true;
         c.account_mut("S-1-5-21-4").cpu_limit = 25;
         c.account_mut("S-1-5-21-4").ram_limit_mb = 2500;
         c.account_mut("S-1-5-21-4").rejoin_crashed = true;

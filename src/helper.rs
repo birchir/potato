@@ -6,9 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM};
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenMutexW, OpenProcess, PROCESS_NAME_WIN32, SYNCHRONIZATION_SYNCHRONIZE, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    CreateEventW, CreateMutexW, OpenMutexW, OpenProcess, PROCESS_NAME_WIN32, SYNCHRONIZATION_SYNCHRONIZE, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClientRect, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindowVisible, IsZoomed, SW_MAXIMIZE, ShowWindow,
@@ -99,6 +99,26 @@ pub struct SessionJobs {
     hung: HashSet<isize>,
     freezes: u32,
     shot_done: u64,
+    /// Roblox's one-client lock, held while Multiple Roblox At Once is on
+    multi: Vec<isize>,
+}
+
+/// Multiple Roblox At Once, like Roblox Account Manager: a new Roblox closes the others in its login when it finds
+/// its lock free, so this login keeps the lock (the old mutex and the newer event) for as long as the setting is on.
+fn hold_multi(on: bool, held: &mut Vec<isize>) {
+    if on == !held.is_empty() {
+        return;
+    }
+    if on {
+        unsafe {
+            held.extend(CreateMutexW(None, true, w!("ROBLOX_singletonMutex")).ok().map(|h| h.0 as isize));
+            held.extend(CreateEventW(None, true, false, w!("ROBLOX_singletonEvent")).ok().map(|h| h.0 as isize));
+        }
+    } else {
+        for h in held.drain(..) {
+            let _ = unsafe { CloseHandle(HANDLE(h as *mut _)) };
+        }
+    }
 }
 
 /// The folder where the helpers leave freeze counts and screenshots for the report (see engine.rs).
@@ -111,6 +131,7 @@ pub fn session_tick(me: &str, jobs: &mut SessionJobs) {
     let config = std::fs::read_to_string(crate::engine::config_path()).map(|t| crate::config::Config::from_json(&t)).unwrap_or_default();
     let a = config.account(me);
     mute(a.on && a.mute, &mut jobs.muted);
+    hold_multi(a.on && a.multi_roblox, &mut jobs.multi);
 
     let mut windows: Vec<isize> = Vec::new();
     unsafe {
