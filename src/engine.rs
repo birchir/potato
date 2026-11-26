@@ -230,20 +230,15 @@ impl Engine {
             let a = self.config.account(&p.sid);
             if !a.on {
                 self.states.remove(&p.sid);
+                files::unlock(&p.local);
                 continue;
             }
-            // Roblox rewrites its settings when it closes, so write while it's closed and only look while it runs
-            let state = if running.contains(p.sid.as_str()) {
-                match files::is_applied(&p.local, &a.plan) {
-                    Ok(true) => State::Applied,
-                    Ok(false) => State::Waiting,
-                    Err(_) => State::Failed,
-                }
-            } else {
-                match files::apply(&p.local, &a.plan) {
-                    Ok(_) => State::Applied,
-                    Err(_) => State::Failed,
-                }
+            // written even while Roblox runs (files::apply locks it against Roblox's save on close); a running
+            // client only picks the change up when it restarts
+            let state = match files::apply(&p.local, &a.plan) {
+                Ok(n) if n > 0 && running.contains(p.sid.as_str()) => State::Waiting,
+                Ok(_) => State::Applied,
+                Err(_) => State::Failed,
             };
             self.states.insert(p.sid.clone(), state);
         }

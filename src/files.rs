@@ -83,8 +83,27 @@ pub fn write(path: &Path, text: &str) -> io::Result<bool> {
     if !backup.exists() {
         fs::write(&backup, old.as_deref().unwrap_or(""))?;
     }
+    set_readonly(path, false);
     fs::write(path, text)?;
     Ok(true)
+}
+
+fn set_readonly(path: &Path, on: bool) {
+    if let Ok(meta) = fs::metadata(path) {
+        let mut p = meta.permissions();
+        if p.readonly() != on {
+            #[allow(clippy::permissions_set_readonly_false)]   // Windows: clears the read-only attribute, nothing more
+            p.set_readonly(on);
+            let _ = fs::set_permissions(path, p);
+        }
+    }
+}
+
+/// Let Roblox save its settings menu again (the account is off or put back).
+pub fn unlock(local: &Path) {
+    if let Some(p) = basic_settings(local) {
+        set_readonly(&p, false);
+    }
 }
 
 /// Put back what was there before Potato. Returns how many files it restored.
@@ -93,6 +112,7 @@ pub fn restore(paths: &[PathBuf]) -> io::Result<usize> {
     for path in paths {
         let backup = backup_of(path);
         let Ok(old) = fs::read_to_string(&backup) else { continue };
+        set_readonly(path, false);
         if old.is_empty() {
             let _ = fs::remove_file(path);
         } else {
@@ -128,12 +148,16 @@ pub fn is_applied(local: &Path, plan: &Plan) -> io::Result<bool> {
     Ok(changes(local, plan)?.is_empty())
 }
 
-/// Apply the plan to one user's files. Call it only while none of that user's Roblox clients run: Roblox
-/// writes its settings file when it closes. Returns how many files changed.
+/// Apply the plan to one user's files, even while Roblox runs (it reads them when it starts). The settings file is
+/// left read-only: Roblox saves its settings when it closes, which would put the old FPS cap back before a quick
+/// rejoin. Returns how many files changed.
 pub fn apply(local: &Path, plan: &Plan) -> io::Result<usize> {
     let todo = changes(local, plan)?;
     for (path, text) in &todo {
         write(path, text)?;
+    }
+    if let Some(p) = basic_settings(local) {
+        set_readonly(&p, true);
     }
     Ok(todo.len())
 }
@@ -201,8 +225,11 @@ mod tests {
         assert_eq!(apply(&local, &plan(true)).unwrap(), 3);
         assert!(is_applied(&local, &plan(true)).unwrap());
         assert!(fs::read_to_string(&xml).unwrap().contains(">40<"));
+        assert!(fs::metadata(&xml).unwrap().permissions().readonly(), "locked so Roblox's save on close can't undo it");
         assert_eq!(apply(&local, &plan(true)).unwrap(), 0);   // already applied: nothing to write
+        assert_eq!(apply(&local, &plan(false)).unwrap(), 2);  // a locked file can still be changed by Potato
         assert_eq!(restore(&all_files(&local)).unwrap(), 3);
+        assert!(!fs::metadata(&xml).unwrap().permissions().readonly());
         assert_eq!(fs::read_to_string(&xml).unwrap(), "<int name=\"FramerateCap\">-1</int>");
         assert!(flag_files(&local).iter().all(|p| !p.exists()));   // flag files Potato created are gone again
     }
