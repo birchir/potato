@@ -223,6 +223,8 @@ impl Engine {
         self.last_tick = Some(Instant::now());
         self.clients = system::clients();
         self.memory = system::memory();
+        // looked up again every tick: an alt's Roblox folder only appears after its first Roblox, often after Potato started
+        self.profiles = system::profiles();
         let running: HashSet<&str> = self.clients.iter().map(|c| c.sid.as_str()).collect();
         for p in &self.profiles {
             let a = self.config.account(&p.sid);
